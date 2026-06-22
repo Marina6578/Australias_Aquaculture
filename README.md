@@ -21,18 +21,18 @@ The Data analysis and visualization for this project were conducted in R
 
 | # | Script | Description | Manuscript section | Output(s) |
 |---|--------|--------------|----------------------|-----------|
-| 0a | `0_abares_species_states_PublicationV1.Rmd` | Uploads ABARES reports, separates by state, and plots production by aquaculture species | Most plots are in the supplementary materials | `processed_data/top_species_multi_year_long.csv`<br>`processed_data/top_species_multi_year_wide.csv` |
-| 0b | `0_shellfish_NSW_measure_leases_PublicationV1.Rmd` | Checks the size of NSW aquaculture farms to build similarly sized polygons for QLD marine farms (used later in `4_QLD_marine_aquaculture_PublicationV1.Rmd`) | Supplements and methods | Figure S5 |
-| 1 | `1_Farm_location_open_sources_PublicationV1.Rmd` | Geocodes and plots a list of farm addresses compiled from open web sources (`raw_data/aquaculture_farms_compilation_web.csv`); the resulting KML was used in Google Earth Pro to build polygons for land-based farms in NSW, TAS, and VIC, incorporating custodian-confirmed species and farms geocoded in `2_Insights_Land_based_Leases.Rmd` | Methods section and supplementary materials | `output_data/aquaculture_farms_spatial.shp`<br>`output_data/aquaculture_farms_spatial.kml` |
-| 2a | `2_Insights_Land_based_Leases_PublicationV1.Rmd` | Reviews leases across all Australian states, focusing on land-based leases, and adds species columns | — | `output_data/Australian_Aqua_sites/SA_land_sites.shp` (+ equivalent per state) |
-| 2b | `2_making_land_mask_australia_PublicationV1.Rmd` | — | — | — |
-| 3 | `3_ponds_Australian_Aquaculture_PublicationV1.Rmd` | Identifies and maps aquaculture ponds across Australia using GEE-derived NDWI data (2021–2022); covers land-based sites across seven states | — | — |
-| 4 | `4_QLD_marine_aquaculture_PublicationV1.Rmd` | — | — | — |
-| 5 | `5_AUS_Marine_Presence_infra_and_Species_PublicationV1.Rmd` | Organises marine species aquaculture data and summarises which species are raised in which state | Results of the infrastructure detection made in GEE | — |
-| 6 | `6_Figures_species_by_state_PublicationV1.Rmd` | Builds matrices summarising data availability/attributes by state | Results of piecing together state data and showing custodian availability gaps; Figure 1 | — |
-| 7 | `7_atribute_table_setting_land_sites_PublicationV1.Rmd` | — | — | — |
-| 8 | `8_maps_active_inactive_PublicationV1.Rmd` | Maps active and inactive sites, land-based and marine | Figure 2 | — |
-| 9 | `9_production_distribution_model_refactored_PublicationV1.Rmd` | Builds the production distribution allocation model | All results in the production distribution section; Figure 4 | `figures/Production_Validation_Horizontalv2.png` |
+| 0a | `00_abares_species_states_PublicationV1.Rmd` | Uploads ABARES reports, separates by state, and plots production by aquaculture species | Most plots are in the supplementary materials | `processed_data/top_species_multi_year_long.csv`<br>`processed_data/top_species_multi_year_wide.csv` |
+| 0b | `00_shellfish_NSW_measure_leases_PublicationV1.Rmd` | Checks the size of NSW aquaculture farms to build similarly sized polygons for QLD marine farms (used later in `4_QLD_marine_aquaculture_PublicationV1.Rmd`) | Supplements and methods | Figure S5 |
+| 1 | `01_Farm_location_open_sources_PublicationV1.Rmd` | Geocodes and plots a list of farm addresses compiled from open web sources (`raw_data/aquaculture_farms_compilation_web.csv`); the resulting KML was used in Google Earth Pro to build polygons for land-based farms in NSW, TAS, and VIC, incorporating custodian-confirmed species and farms geocoded in `2_Insights_Land_based_Leases.Rmd` | Methods section and supplementary materials | `output_data/aquaculture_farms_spatial.shp`<br>`output_data/aquaculture_farms_spatial.kml` |
+| 2a | `02_Insights_Land_based_Leases_PublicationV1.Rmd` | Reviews leases across all Australian states, focusing on land-based leases, and adds species columns | — | `output_data/Australian_Aqua_sites/SA_land_sites.shp` (+ equivalent per state) |
+| 2b | `02_making_land_mask_australia_PublicationV1.Rmd` | — | — | — |
+| 3 | `03_ponds_Australian_Aquaculture_PublicationV1.Rmd` | Identifies and maps aquaculture ponds across Australia using GEE-derived NDWI data (2021–2022); covers land-based sites across seven states | — | — |
+| 4 | `04_QLD_marine_aquaculture_PublicationV1.Rmd` | — | — | — |
+| 5 | `05_AUS_Marine_Presence_infra_and_Species_PublicationV1.Rmd` | Organises marine species aquaculture data and summarises which species are raised in which state | Results of the infrastructure detection made in GEE | — |
+| 6 | `06_Figures_species_by_state_PublicationV1.Rmd` | Builds matrices summarising data availability/attributes by state | Results of piecing together state data and showing custodian availability gaps; Figure 1 | — |
+| 7 | `07_atribute_table_setting_land_sites_PublicationV1.Rmd` | — | — | — |
+| 8 | `08_maps_active_inactive_PublicationV1.Rmd` | Maps active and inactive sites, land-based and marine | Figure 2 | — |
+| 9 | `09_production_distribution_model_refactored_PublicationV1.Rmd` | Builds the production distribution allocation model | All results in the production distribution section; Figure 4 | `figures/Production_Validation_Horizontalv2.png` |
 | 10 | `10_Reporting_Aquaculture_production_findings_PublicationV1.Rmd` | Summarises and reports the distribution modelling results | All production distribution summaries; Figure 4 | — |
 | 11 | `11_production_distribution_map_PublicationV1.Rmd` | Maps production intensity for 5 species and species locations for most AU aquaculture | Figure 3; Figure 4 | `figures/Production_Distribution_Map_Combined.png`<br>`figures/Supplementary_AllSpecies_Distribution_Map_Combinedv2.png` |
 | 12 | `12_results_marine_and_land_PublicationV1.Rmd` | Produces marine and land-based aquaculture results text (built from reading and calculating across multiple Excel spreadsheets) | Beginning of the land-based and marine aquaculture EO detection results sections | — |
