@@ -1,0 +1,473 @@
+---
+title: "7_atribute_table_setting_land_sites"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+date: "2025-11-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#ponds shapefiles are at "output_data/ponds_in_sites/ponds_in_sites_in_
+#land sites shapefiles are at: "output_data/Australian_Aqua_sites" and are "state"_land_sites.shp
+```{r}
+library(terra)
+library(here)
+library(dplyr)
+```
+
+
+```{r}
+state_shapes <- list(
+  "QLD" = here("output_data", "Australian_Aqua_sites", "QLD_land_sites.shp"),
+  "NT"  = here("output_data", "Australian_Aqua_sites", "NT_land_sites.shp"),
+  "NSW" = here("output_data", "Australian_Aqua_sites", "NSW_land_sites.shp"),
+  "TAS" = here("output_data", "Australian_Aqua_sites", "TAS_land_sites.shp"),
+  "SA"  = here("output_data", "Australian_Aqua_sites", "SA_land_sites.shp"),
+  "WA"  = here("output_data", "Australian_Aqua_sites", "WA_land_sites.shp"),
+  "VIC" = here("output_data", "Australian_Aqua_sites", "VIC_land_sites.shp")
+)
+ 
+for (state in names(state_shapes)) {
+  path <- state_shapes[[state]]
+  if (file.exists(path)) {
+    v <- vect(path)
+    print(paste("----------------", state, "----------------"))
+    print("COLUMN NAMES:")
+    print(names(v))
+    print("FIRST ROW DATA:")
+    print(head(v, 1))
+    print(" ")
+  } else {
+    print(paste("Warning: File not found for", state))
+  }
+}
+```
+
+ 
+#loop to make the table
+#the shp created has pond polygons for actove but lease polygons for inactive, should we maintain that or not? Australia_Land_Aquaculture_National 
+
+```{r}
+
+library(terra)
+library(sf)
+library(here)
+library(dplyr)
+
+# --- 1. CONFIGURATION ---
+
+# Ponds shapefiles are in output_data/ponds_in_sites/
+input_ponds_dir <- here("output_data", "ponds_in_sites")
+
+# Output directory for final shapefiles
+output_dir <- here("output_data", "Land_Aquaculture_Vectors")
+
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+ 
+# Land-based aquaculture site shapefiles (ALL Australian states)
+state_shapes <- list(
+  "QLD" = here("output_data", "Australian_Aqua_sites", "QLD_land_sites.shp"),
+  "NT"  = here("output_data", "Australian_Aqua_sites", "NT_land_sites.shp"),
+  "NSW" = here("output_data", "Australian_Aqua_sites", "NSW_land_sites.shp"),
+  "TAS" = here("output_data", "Australian_Aqua_sites", "TAS_land_sites.shp"),
+  "SA"  = here("output_data", "Australian_Aqua_sites", "SA_land_sites.shp"),
+  "WA"  = here("output_data", "Australian_Aqua_sites", "WA_land_sites.shp"),
+  "VIC" = here("output_data", "Australian_Aqua_sites", "VIC_land_sites.shp")
+)
+ 
+# Maps State Shapefile ID -> Our 'SiteID_Custodian'
+id_col_map <- list(
+  "QLD" = "site_id",
+  "NT"  = "site_id",
+  "NSW" = "site_id",
+  "TAS" = "site_id",
+  "SA"  = "reg_no",
+  "WA"  = "aqua_id",
+  "VIC" = "site_id"
+)
+
+# Define target CRS - Australian Albers (EPSG:3577)
+target_crs <- "EPSG:3577"
+
+# Custodian organization mapping
+custodian_map <- list(
+  "QLD" = "Queensland Department of Agriculture and Fisheries",
+  "NT"  = "Northern Territory Department of Industry, Tourism and Trade",
+  "NSW" = "NSW Department of Primary Industries",
+  "TAS" = "Tasmania Department of Natural Resources and Environment",
+  "SA"  = "South Australia Primary Industries and Regions",
+  "WA"  = "Western Australia Department of Primary Industries and Regional Development",
+  "VIC" = "Victoria Department of Energy, Environment and Climate Action"
+)
+# --- 2. MAIN PROCESSING LOOP ---
+ 
+for (state in names(state_shapes)) {
+
+  # --- A. Setup & Checks ---
+  if (!file.exists(state_shapes[[state]])) {
+    message(paste("Skipping", state, "- Shapefile not found."))
+    next
+  }
+
+  message(paste("--- Processing State:", state, "---"))
+
+  # Load Sites using sf
+  sites_sf <- st_read(state_shapes[[state]], quiet = TRUE)
+  
+  # Check and reproject sites to Australian Albers if needed
+  message(paste("Sites CRS:", st_crs(sites_sf)$input))
+  if (st_crs(sites_sf) != st_crs(target_crs)) {
+    message(paste("Reprojecting sites to Australian Albers (EPSG:3577)"))
+    sites_sf <- st_transform(sites_sf, target_crs)
+  }
+
+  # PRE-CALC PARENT AREA (Used for both Active and Inactive)
+  # Converting square meters to square kilometers
+  sites_sf$PARENT_AREA_KM <- as.numeric(st_area(sites_sf)) / 1e6
+
+  # Identify the ID column for this state
+  target_id_col <- id_col_map[[state]]
+  
+  # Create a unique numeric ID for joining
+  sites_sf$TEMP_JOIN_ID <- 1:nrow(sites_sf)
+
+  # --- B. Process Ponds Shapefiles (Find Active Sites) ---
+  
+  # Look for pond shapefile for this state
+  pond_file <- here(input_ponds_dir, paste0("ponds_in_sites_in_", state, ".shp"))
+
+  # Initialize empty objects
+  active_sf <- NULL
+  active_df <- NULL
+  found_ids <- c() # Keep track of IDs we found ponds in
+
+  if (file.exists(pond_file)) {
+    message(paste("Found pond shapefile:", basename(pond_file)))
+    
+    # Read pond vector using sf
+    ponds_sf <- st_read(pond_file, quiet = TRUE)
+    
+    # Check and reproject ponds to Australian Albers if needed
+    message(paste("Ponds CRS:", st_crs(ponds_sf)$input))
+    if (st_crs(ponds_sf) != st_crs(target_crs)) {
+      message(paste("Reprojecting ponds to Australian Albers (EPSG:3577)"))
+      ponds_sf <- st_transform(ponds_sf, target_crs)
+    }
+
+    message(paste("Intersecting", nrow(ponds_sf), "ponds with sites..."))
+    
+    # SPATIAL INTERSECTION - This will keep only ponds within sites
+    # and attach site attributes to each pond
+    ponds_in_sites <- st_intersection(ponds_sf, sites_sf)
+    
+    message(paste("Found", nrow(ponds_in_sites), "pond-site intersections"))
+    
+  if (nrow(ponds_in_sites) > 0) {
+
+      # Calculate pond areas AFTER intersection
+      ponds_in_sites$pond_area_m2 <- as.numeric(st_area(ponds_in_sites))
+
+      # Aggregate pond areas by site
+      site_summaries <- ponds_in_sites %>%
+        st_drop_geometry() %>%
+        group_by(TEMP_JOIN_ID) %>%
+        summarise(
+          total_pond_area_km = sum(pond_area_m2, na.rm = TRUE) / 1e6,
+          n_ponds = n(),
+          .groups = "drop"
+        ) %>%
+        as.data.frame()
+
+      message(paste("Found", nrow(site_summaries), "sites with ponds"))
+
+      # ---- Build active output with LEASE geometry (not pond union) ----
+      active_sites <- sites_sf %>%
+        inner_join(site_summaries, by = "TEMP_JOIN_ID")
+
+      found_ids <- active_sites[[target_id_col]]
+
+      active_df <- data.frame(
+        SiteID            = paste0(state, "_A_", sprintf("%04d", seq_len(nrow(active_sites)))),
+        SiteID_Custodian  = found_ids,
+        Production_realm  = "Land-based",
+        Taxon             = if("group"   %in% names(active_sites)) active_sites$group   else NA_character_,
+        Species_custodian = if("species" %in% names(active_sites)) active_sites$species else NA_character_,
+        Species_verified  = if("species" %in% names(active_sites)) active_sites$species else NA_character_,
+        Status_custodian  = if("status"  %in% names(active_sites)) active_sites$status  else NA_character_,
+        Production_t      = NA_real_,
+        Infra_status      = "active",
+        Infra_type        = "ponds",
+        Lease_Area_KM     = round(active_sites$PARENT_AREA_KM, 6),
+        Infra_Area_KM     = round(active_sites$total_pond_area_km, 6),
+        LGA               = if("LGA" %in% names(active_sites)) active_sites$LGA else NA_character_,
+        State             = state,
+        Year              = "2021-2022",
+        Custodian_ID      = custodian_map[[state]],
+        Method            = "NDWI Sentinel2 Stack",
+        stringsAsFactors  = FALSE
+      )
+
+     active_sf <- st_sf(active_df, geometry = st_geometry(active_sites))
+     
+     # ---- Save pond-level detections (separate from leases) ----
+      # Link each pond to the SiteID of its parent lease
+      siteid_lookup <- data.frame(
+        TEMP_JOIN_ID = active_sites$TEMP_JOIN_ID,
+        SiteID       = active_df$SiteID
+      )
+      ponds_linked <- ponds_in_sites %>%
+        left_join(siteid_lookup, by = "TEMP_JOIN_ID")
+
+      n_ponds <- nrow(ponds_linked)
+      ponds_df <- data.frame(
+        DetectID         = paste0(state, "_POND_", sprintf("%06d", seq_len(n_ponds))),
+        SiteID           = ponds_linked$SiteID,
+        SiteID_Custodian = as.character(ponds_linked[[target_id_col]]),
+        Production_realm = "Land-based",
+        State            = state,
+        Infra_type       = "Pond",
+        Infra_Area_KM    = round(ponds_linked$pond_area_m2 / 1e6, 6),
+        Year             = "2021-2022",
+        Method           = "NDWI Sentinel2 Stack",
+        stringsAsFactors = FALSE
+      )
+      active_ponds_sf <- st_sf(ponds_df, geometry = st_geometry(ponds_linked))
+
+      out_ponds_gpkg <- here(output_dir, paste0(state, "_Land_Ponds.gpkg"))
+      st_write(active_ponds_sf, out_ponds_gpkg, delete_dsn = TRUE, quiet = TRUE)
+    }   # closes: if (nrow(ponds_in_sites) > 0)
+
+  } else {
+    message(paste("No pond shapefile found for", state))
+  }     # closes: if (file.exists(pond_file))
+
+  # --- C. Process Empty Sites (Find Inactive Sites) ---
+ 
+  # Identify which IDs were NOT found in the intersection
+  all_ids <- sites_sf[[target_id_col]]
+  missing_ids <- setdiff(all_ids, found_ids)
+
+  inactive_sf <- NULL
+  inactive_df <- NULL
+
+  if (length(missing_ids) > 0) {
+    
+    message(paste("Found", length(missing_ids), "sites without ponds (inactive)"))
+    
+    # Filter the original sites to only the missing ones
+    inactive_sf <- sites_sf[sites_sf[[target_id_col]] %in% missing_ids, ]
+
+    # Get status if available
+    status_val <- rep(NA, nrow(inactive_sf))
+    if ("status" %in% tolower(names(inactive_sf))) {
+      real_col <- names(inactive_sf)[grep("^status$", names(inactive_sf), ignore.case=TRUE)[1]]
+      status_val <- inactive_sf[[real_col]]
+    }
+
+    # Build Inactive DataFrame
+   inactive_df <- data.frame(
+  SiteID            = paste0(state, "_I_", sprintf("%04d", 1:nrow(inactive_sf))),
+  SiteID_Custodian  = inactive_sf[[target_id_col]],  # Original ID from state government
+  Production_realm  = "Land-based",
+  Taxon             = if("group" %in% names(inactive_sf)) inactive_sf$group else NA_character_,
+  Species_custodian = if("species" %in% names(inactive_sf)) inactive_sf$species else NA_character_,
+  Species_verified  = if("species" %in% names(inactive_sf)) inactive_sf$species else NA_character_,
+  Status_custodian  = if("status" %in% names(inactive_sf)) inactive_sf$status else NA_character_,
+  Production_t      = NA_real_,
+  Infra_status      = "inactive",
+  Infra_type        = NA_character_,
+  Lease_Area_KM     = round(inactive_sf$PARENT_AREA_KM, 6),
+  Infra_Area_KM     = 0,
+  LGA               = if("LGA" %in% names(inactive_sf)) inactive_sf$LGA else NA_character_,
+  State             = state,
+  Year              = "2021-2022",
+  Custodian_ID      = custodian_map[[state]],  # Organization name
+  Method            = "No water detected with NDWI in Sentinel2 Stack",
+  stringsAsFactors  = FALSE
+)
+
+    # Create new sf object with just the geometry and new attributes
+    inactive_sf <- st_sf(inactive_df, geometry = st_geometry(inactive_sf))
+  }
+
+  # --- D. Combine & Save ---
+  
+  final_sf <- NULL
+  final_df <- NULL
+
+  if (!is.null(active_sf) && !is.null(inactive_sf)) {
+    final_sf <- rbind(active_sf, inactive_sf)
+    final_df <- rbind(st_drop_geometry(active_sf), st_drop_geometry(inactive_sf))
+  } else if (!is.null(active_sf)) {
+    final_sf <- active_sf
+    final_df <- st_drop_geometry(active_sf)
+  } else if (!is.null(inactive_sf)) {
+    final_sf <- inactive_sf
+    final_df <- st_drop_geometry(inactive_sf)
+  }
+
+  if (!is.null(final_sf)) {
+    out_shp <- here(output_dir, paste0(state, "_Land_Mapped.shp"))
+    out_csv <- here(output_dir, paste0(state, "_Land_Attributes.csv"))
+    
+    # --- Combine pond detections from all states ---
+message("\nCombining pond detections...")
+all_ponds <- list()
+for (state in states) {
+  pf <- here(input_dir, paste0(state, "_Land_Ponds.gpkg"))
+  if (file.exists(pf)) {
+    all_ponds[[state]] <- st_read(pf, quiet = TRUE)
+    message(paste("  ✓ Loaded", nrow(all_ponds[[state]]), "ponds from", state))
+  }
+}
+
+if (length(all_ponds) > 0) {
+  national_ponds <- do.call(rbind, all_ponds)
+  if (st_crs(national_ponds) != st_crs("EPSG:3577")) {
+    national_ponds <- st_transform(national_ponds, "EPSG:3577")
+  }
+  out_ponds_national <- here(input_dir, "Australia_Land_Aquaculture_Ponds_National.gpkg")
+  st_write(national_ponds, out_ponds_national, delete_dsn = TRUE, quiet = TRUE)
+  message(paste("✓ Saved", nrow(national_ponds), "pond detections to",
+                basename(out_ponds_national)))
+  message(paste("  Total pond area:",
+                round(sum(national_ponds$Infra_Area_KM, na.rm = TRUE), 2), "km²"))
+}
+
+    st_write(final_sf, out_shp, delete_dsn = TRUE, quiet = TRUE)
+    write.csv(final_df, out_csv, row.names = FALSE)
+
+    message(paste("Saved:", basename(out_shp), 
+                  "| Active:", ifelse(is.null(active_sf), 0, nrow(active_sf)),
+                  "| Inactive:", ifelse(is.null(inactive_sf), 0, nrow(inactive_sf))))
+  } else {
+    message("No data generated for this state.")
+  }
+  
+  message("---")
+}
+ 
+message("All States Processed.")
+```
+
+#Making the Australian land aquaculture Natinal datasets
+```{r}
+library(sf)
+library(here)
+library(dplyr)
+
+# --- COMBINE ALL STATE LAND-BASED AQUACULTURE DATA ---
+
+message("=== Creating National Land-Based Aquaculture Dataset ===\n")
+
+# Directory with state-level outputs
+input_dir <- here("output_data", "Land_Aquaculture_Vectors")
+
+# Output files
+output_shp <- here(input_dir, "Australia_Land_Aquaculture_National.shp")
+output_csv <- here(input_dir, "Australia_Land_Aquaculture_National.csv")
+
+# List of states
+states <- c("QLD", "NT", "NSW", "TAS", "SA", "WA", "VIC")
+
+# Initialize list to store state data
+all_states_sf <- list()
+all_states_df <- list()
+
+# Read each state file
+for (state in states) {
+  state_file <- here(input_dir, paste0(state, "_Land_Mapped.shp"))
+  
+  if (file.exists(state_file)) {
+    message(paste("Loading", state, "..."))
+    
+    # Read shapefile
+    state_sf <- st_read(state_file, quiet = TRUE)
+    
+    # Also read CSV to preserve full column names (shapefiles truncate names)
+    state_csv <- here(input_dir, paste0(state, "_Land_Attributes.csv"))
+    if (file.exists(state_csv)) {
+      state_df <- read.csv(state_csv, stringsAsFactors = FALSE)
+      all_states_df[[state]] <- state_df
+    }
+    
+    all_states_sf[[state]] <- state_sf
+    
+    message(paste("  ✓ Loaded", nrow(state_sf), "sites from", state))
+  } else {
+    message(paste("  ✗ Warning: File not found for", state))
+  }
+}
+
+# Combine all states
+if (length(all_states_sf) > 0) {
+  message("\nCombining all states...")
+  
+  # Combine shapefiles
+  national_sf <- do.call(rbind, all_states_sf)
+  
+  # Combine CSVs (preserves full column names)
+  national_df <- do.call(rbind, all_states_df)
+  
+  # Ensure CRS is Australian Albers
+  if (st_crs(national_sf) != st_crs("EPSG:3577")) {
+    message("Ensuring Australian Albers CRS...")
+    national_sf <- st_transform(national_sf, "EPSG:3577")
+  }
+  
+  # Save combined dataset
+  message("\nSaving national dataset...")
+  st_write(national_sf, output_shp, delete_dsn = TRUE, quiet = TRUE)
+  write.csv(national_df, output_csv, row.names = FALSE)
+  
+  message(paste("\n=== SUMMARY ==="))
+  message(paste("Total sites:", nrow(national_sf)))
+  message(paste("  Active sites (with ponds):", sum(national_df$Infra_status == "active")))
+  message(paste("  Inactive sites (no ponds):", sum(national_df$Infra_status == "inactive")))
+  message(paste("\nBreakdown by state:"))
+  
+  state_summary <- national_df %>%
+    group_by(State, Infra_status) %>%
+    summarise(n_sites = n(), .groups = "drop") %>%
+    tidyr::pivot_wider(names_from = Infra_status, values_from = n_sites, values_fill = 0)
+  
+  print(state_summary)
+  
+  message(paste("\nTotal pond area:", round(sum(national_df$Infra_Area_KM, na.rm = TRUE), 2), "km²"))
+  message(paste("Total site area:", round(sum(national_df$Lease_Area_KM, na.rm = TRUE), 2), "km²"))
+  
+  message(paste("\n✓ Saved national shapefile:", basename(output_shp)))
+  message(paste("✓ Saved national CSV:", basename(output_csv)))
+  
+} else {
+  message("Error: No state files found!")
+}
+
+message("\n=== National Dataset Creation Complete ===")
+```
+
+```{r}
+library(sf)
+library(here)
+
+# Check the new national file
+national_sf <- st_read(here("output_data", "Land_Aquaculture_Vectors", 
+                            "Australia_Land_Aquaculture_National.shp"))
+
+cat("Species data check:\n")
+cat("Rows with Taxon:", sum(!is.na(national_sf$Taxon)), "of", nrow(national_sf), "\n")
+cat("Rows with Species:", sum(!is.na(national_sf$Spcs_cs)), "of", nrow(national_sf), "\n")
+
+cat("\nUnique species:\n")
+print(table(national_sf$Spcs_cs, useNA = "always"))
+
+cat("\nUnique taxon/groups:\n")
+print(table(national_sf$Taxon, useNA = "always"))
+```
+
+

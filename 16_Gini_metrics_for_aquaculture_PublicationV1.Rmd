@@ -1,0 +1,618 @@
+---
+title: "16_Gini_metrics_aquaculture"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+date: "2026-04-20"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#caveat: when we do Gini by state, since Gini is mathematically capped at (n−1)/n = 0.857 (everything in one state). So salmon Gini will come out ~0.85, not 0.98. This isn't a flaw — it's what the metric does with discrete regions — but you'll want to mention it in methods so reviewers don't wonder why your Gini values cluster below 0.9.
+
+#To quantify the spatial concentration of detected aquaculture infrastructure across Australia, we computed the Gini coefficient of detected infrastructure area per species across the seven states and territories. Area-weighted Gini values were used as the primary metric, as they reflect the physical extent of production rather than treating every detected pond or pen as equivalent. The Gini coefficient ranges from 0 (perfectly even distribution) to (n−1)/n ≈ 0.857 for seven administrative units (all infrastructure in one state). Count-based Gini values are reported alongside as a robustness check.
+
+#calculating GINI by detection
+```{r}
+library(dplyr); library(tidyr); library(sf)
+
+#define the output directory 
+
+out_dir <- here("output_data", "summaries")
+
+# --- Manual Gini (no extra package needed) ---------------------------------
+gini <- function(x) {
+  x <- x[!is.na(x)]; x <- sort(x)
+  n <- length(x)
+  if (n < 2 || sum(x) == 0) return(NA_real_)
+  sum((2 * seq_len(n) - n - 1) * x) / (n * sum(x))
+}
+
+# --- 1. Work from detections ----------------------------------------------
+det <- detections %>% st_drop_geometry() %>%
+  filter(!is.na(state), state != "Unknown",
+         !is.na(species), species != "Unknown")
+
+# --- NEW: recode land-based finfish polyculture categories ----------------
+det <- det %>%
+  mutate(species = case_when(
+    species %in% c(
+      "Multiple (Salmon, Hatchery)",
+      "Multiple (Golden Perch, Silver Perch, Murray Cod, Yabby, Hatchery)",
+      "Multiple(trout, salmon)",
+      "Multiple (Murray Cod, Hatchery)"
+    ) ~ "Land-based finfish polyculture",
+    TRUE ~ species
+  ))
+
+state_levels <- sort(unique(det$state))
+
+
+# --- 2. Species × state grid with zeros ------------------------------------
+species_state <- det %>%
+  group_by(realm, species, state) %>%
+  summarise(
+    n_detections = n(),
+    infra_km2    = sum(infra_area_km2, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  complete(nesting(realm, species), state = state_levels,
+           fill = list(n_detections = 0, infra_km2 = 0))
+
+# --- 3. Share statistics (area-based is primary) ---------------------------
+species_shares <- species_state %>%
+  group_by(realm, species) %>%
+  mutate(
+    total_infra     = sum(infra_km2),
+    total_n         = sum(n_detections),
+    share_area_pct  = round(100 * infra_km2    / total_infra, 1),
+    share_count_pct = round(100 * n_detections / total_n,     1)
+  ) %>%
+  ungroup() %>%
+  filter(total_infra > 0)
+
+# Dominant state per species (by area)
+dominant <- species_shares %>%
+  group_by(realm, species) %>%
+  slice_max(share_area_pct, n = 1, with_ties = FALSE) %>%
+  select(realm, species,
+         dominant_state     = state,
+         dominant_share_pct = share_area_pct)
+
+# --- 4. Per-species Gini ---------------------------------------------------
+species_gini <- species_state %>%
+  group_by(realm, species) %>%
+  summarise(
+    # Compute all column-referenced metrics FIRST, before shadowing names
+    n_states_present   = sum(n_detections > 0),
+    gini_count         = round(gini(n_detections), 3),
+    gini_area          = round(gini(infra_km2),    3),
+    total_infra_km2    = round(sum(infra_km2), 3),
+    n_detections_total = sum(n_detections),     # renamed to avoid shadowing
+    .groups = "drop"
+  ) %>%
+  left_join(dominant, by = c("realm", "species")) %>%
+  filter(total_infra_km2 > 0.01) %>%
+  arrange(desc(total_infra_km2))
+
+# --- 5. Overall Gini per realm (all species combined, area-weighted) -------
+overall_gini <- det %>%
+  group_by(realm, state) %>%
+  summarise(
+    infra_km2    = sum(infra_area_km2, na.rm = TRUE),
+    n_detections = n(),
+    .groups = "drop"
+  ) %>%
+  complete(realm, state = state_levels,
+           fill = list(infra_km2 = 0, n_detections = 0)) %>%
+  group_by(realm) %>%
+  summarise(
+    total_infra_km2 = round(sum(infra_km2), 2),
+    gini_area       = round(gini(infra_km2),    3),
+    gini_count      = round(gini(n_detections), 3),
+    .groups = "drop"
+  )
+# --- NEW: publication-ready filtered table --------------------------------
+species_gini_clean <- species_gini %>%
+  filter(species != "Miscellaneous") %>%
+  arrange(desc(total_infra_km2))
+
+write.csv(species_gini_clean,
+          file.path(out_dir, "concentration_gini_by_species_final.csv"),
+          row.names = FALSE)
+# --- 6. Print + save -------------------------------------------------------
+cat("\n====== OVERALL CONCENTRATION BY REALM (detection-based) ======\n")
+print(overall_gini)
+
+cat("\n====== PER-SPECIES GINI & DOMINANT STATE ======\n")
+print(species_gini, n = 30, width = 140)
+
+cat("\n====== AREA-SHARE TABLE (% of each species' infra per state) ======\n")
+shares_wide <- species_shares %>%
+  select(realm, species, state, share_area_pct) %>%
+  pivot_wider(names_from = state, values_from = share_area_pct, values_fill = 0) %>%
+  arrange(realm, species)
+print(shares_wide, n = 30, width = 120)
+
+
+write.csv(species_gini, file.path(out_dir, "concentration_gini_by_species_detections.csv"), row.names = FALSE)
+write.csv(shares_wide,  file.path(out_dir, "concentration_share_by_species_state_detections.csv"), row.names = FALSE)
+write.csv(overall_gini, file.path(out_dir, "concentration_gini_overall_detections.csv"), row.names = FALSE)
+
+```
+```{r}
+cat("\n====== OVERALL DETECTION AREA BY STATE × REALM ======\n")
+overall_state_breakdown <- det %>%
+  group_by(realm, state) %>%
+  summarise(infra_km2 = round(sum(infra_area_km2, na.rm = TRUE), 2),
+            n = n(),
+            .groups = "drop") %>%
+  arrange(realm, desc(infra_km2))
+print(overall_state_breakdown, n = 30)
+```
+
+
+
+#clean table
+```{r}
+species_gini_clean %>%
+  filter(n_states_present > 1) %>%
+  select(realm, species, n_states_present, gini_area,
+         dominant_state, dominant_share_pct) %>%
+  arrange(desc(n_states_present), gini_area)
+
+
+write.csv(species_gini_clean,
+          file.path(out_dir, "concentration_gini_by_species_final.csv"),
+          row.names = FALSE)
+```
+#Footnote 1 : 
+#The "Miscellaneous" marine category (0.136 km², South Australia, 12 detections) was excluded from species-level concentration analysis as it lacks species-level identification.
+
+#Footnote 2: The "Land-based finfish polyculture" category aggregates four detected categories of finfish-dominant mixed-species land-based operations: salmon/hatchery facilities (TAS), multi-species native finfish operations including minor yabby presence (NSW), trout/salmon (VIC), and Murray cod/hatchery (VIC). Barramundi/prawn polyculture (NT/QLD, 0.245 km²) is reported separately as a distinct finfish/crustacean production system.
+
+#49.5 km² of national detected aquaculture infrastructure analysed
+#99.7% covered by the main table
+#oysters as the only genuinely multi-state species (Gini 0.597), barramundi's true bi-state production (Gini 0.676, QLD+NT split), and 16 of 25 species single-state with Gini at the 0.857 ceiling
+
+#Table X reports species-level concentration for 21 single-species and defined-polyculture categories, covering 49.39 km² (99.7%) of the 49.53 km² of nationally detected aquaculture infrastructure analysed. The remaining 0.14 km² (0.3%) is the "Miscellaneous" marine category, which was excluded as it lacks species-level identification.
+
+#results texts numbers
+```{r}
+species_gini_clean %>%
+  summarise(
+    n_categories_total = n(),
+    n_single_state     = sum(n_states_present == 1),
+    n_multi_state      = sum(n_states_present >  1),
+    pct_single_state   = round(100 * mean(n_states_present == 1), 1)
+  )
+
+```
+
+```{r auto-results-paragraph}
+
+library(glue)
+
+# ---- Helpers ---------------------------------------------------------------
+# State abbreviation → full name for readable prose
+state_full <- c(
+  NSW = "New South Wales", VIC = "Victoria", QLD = "Queensland",
+  SA  = "South Australia", WA  = "Western Australia",
+  TAS = "Tasmania",        NT  = "Northern Territory"
+)
+
+# Display names for prose (strip internal aggregation suffixes)
+species_display <- c(
+  "Edible Oyster (aggregated)"         = "edible oysters",
+  "Mussel (aggregated)"                = "mussels",
+  "Southern Bluefin Tuna (aggregated)" = "southern bluefin tuna",
+  "Atlantic Salmon"                    = "Atlantic salmon",
+  "Red Claw Crayfish"                  = "red claw crayfish",
+  "Cherax spp."                        = "Cherax spp.",
+  "Microalgae"                         = "microalgae"
+)
+nice_species <- function(x) ifelse(x %in% names(species_display),
+                                   unname(species_display[x]), x)
+
+# Format a list of items with "and" before the last one
+list_items <- function(x) {
+  x <- as.character(x)
+  if (length(x) == 0) return("")
+  if (length(x) == 1) return(x[1])
+  if (length(x) == 2) return(paste(x, collapse = " and "))
+  paste0(paste(x[-length(x)], collapse = ", "), ", and ", x[length(x)])
+}
+
+# Get share of a species in a specific state (for prose)
+get_share <- function(species_name, state_abbr) {
+  v <- species_shares %>%
+    filter(species == species_name, state == state_abbr) %>%
+    pull(share_area_pct)
+  if (length(v) == 0) 0 else v[1]
+}
+
+# ---- Core numbers ----------------------------------------------------------
+n_total        <- nrow(species_gini_clean)
+n_single       <- sum(species_gini_clean$n_states_present == 1)
+n_multi        <- sum(species_gini_clean$n_states_present  > 1)
+pct_single     <- round(100 * n_single / n_total, 0)
+
+n_states_used  <- length(unique(det$state))
+gini_ceiling   <- round((n_states_used - 1) / n_states_used, 3)
+
+# ---- Single-state flagship species -----------------------------------------
+single_state_flagships <- species_gini_clean %>%
+  filter(dominant_share_pct == 100,
+         species %in% c("Atlantic Salmon", "Southern Bluefin Tuna (aggregated)",
+                        "Cherax spp.", "Mussel (aggregated)",
+                        "Microalgae", "Red Claw Crayfish")) %>%
+  mutate(display = glue("{nice_species(species)} (100% {state_full[dominant_state]})")) %>%
+  pull(display)
+
+# ---- Multi-state hierarchy for paragraph 2 ---------------------------------
+multi <- species_gini_clean %>%
+  filter(n_states_present > 1) %>%
+  arrange(desc(n_states_present), gini_area)
+
+# The two standout species to detail
+oyster <- species_gini_clean %>%
+  filter(species == "Edible Oyster (aggregated)") %>% slice(1)
+oyster_sa  <- get_share("Edible Oyster (aggregated)", "SA")
+oyster_nsw <- get_share("Edible Oyster (aggregated)", "NSW")
+oyster_tas <- get_share("Edible Oyster (aggregated)", "TAS")
+
+barra <- species_gini_clean %>%
+  filter(species == "Barramundi", realm == "Land-based") %>% slice(1)
+barra_qld <- get_share("Barramundi", "QLD")
+barra_nt  <- get_share("Barramundi", "NT")
+
+# A third multi-state example to illustrate the range (prawn)
+prawn <- species_gini_clean %>%
+  filter(species == "Prawn", realm == "Land-based") %>% slice(1)
+prawn_qld <- get_share("Prawn", "QLD")
+
+# ---- Realm-level -----------------------------------------------------------
+realm_land   <- overall_gini %>% filter(realm == "Land-based") %>% slice(1)
+realm_marine <- overall_gini %>% filter(realm == "Marine")     %>% slice(1)
+
+# ---- Paragraph 1: single-state summary -------------------------------------
+para1 <- glue(
+"Species-level concentration analysis revealed that {n_single} of {n_total} \\
+detected aquaculture species ({pct_single}%) are produced exclusively in a \\
+single state, corresponding to the theoretical maximum Gini value of \\
+{gini_ceiling} for {n_states_used} administrative units. This single-state \\
+dominance characterised {list_items(single_state_flagships)}."
+)
+
+# ---- Paragraph 2: multi-state hierarchy + standout species ----------------
+para2 <- glue(
+"{n_multi} categories exhibited multi-state production, ranging from broadly \\
+distributed (edible oysters, five states) to more concentrated patterns \\
+(e.g., prawn, which spans three states but remains {prawn_qld}% Queensland-\\
+dominated). The two most geographically distributed species are described \\
+below in detail. Edible oysters were the most evenly distributed, with \\
+infrastructure spanning {oyster$n_states_present} states \\
+(Gini_area = {oyster$gini_area}), dominated by \\
+{state_full[oyster$dominant_state]} ({oyster_sa}%) and New South Wales \\
+({oyster_nsw}%) with substantial presence in Tasmania ({oyster_tas}%). The \\
+divergence between oyster count-based concentration \\
+(Gini_count = {oyster$gini_count}) and area-based concentration \\
+({oyster$gini_area}) reflects the coexistence of small-scale NSW Sydney rock \\
+oyster operations and larger South Australian and Tasmanian Pacific oyster \\
+farms. Barramundi land-based infrastructure was bi-dominantly distributed \\
+(Gini_area = {barra$gini_area}) between Queensland ({barra_qld}%) and the \\
+Northern Territory ({barra_nt}%), reflecting two separate tropical production \\
+systems."
+)
+
+# ---- Paragraph 3: realm-level ---------------------------------------------
+para3 <- glue(
+"At the aggregate realm level, detected marine infrastructure \\
+(Gini_area = {realm_marine$gini_area}) was less concentrated than land-based \\
+infrastructure ({realm_land$gini_area}). However, marine infrastructure showed \\
+stronger divergence between count-based and area-based measures \\
+({realm_marine$gini_count} vs {realm_marine$gini_area}), indicating systematic \\
+differences between states in the structural character of marine aquaculture. \\
+This pattern is consistent with dense salmon pen clusters in Tasmania and \\
+fewer, larger pontoon structures for tuna in South Australia."
+)
+
+# ---- Print -----------------------------------------------------------------
+cat(para1, "\n\n", para2, "\n\n", para3, "\n", sep = "")
+
+# ---- Reference table: full multi-state hierarchy --------------------------
+cat("\n---- MULTI-STATE SPECIES HIERARCHY (reference) ----\n")
+print(multi %>% select(realm, species, n_states_present,
+                       gini_area, gini_count, dominant_state, dominant_share_pct))
+```
+
+
+#plot
+
+```{r gini-plots, fig.width=10, fig.height=7}
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(ggrepel)
+library(scales)
+library(here)
+
+# ---- Output directory for figures -----------------------------------------
+fig_dir <- here("figures", "gini_concentration")
+dir.create(fig_dir, recursive = TRUE, showWarnings = FALSE)
+
+# ---- Colourblind-safe palettes --------------------------------------------
+species_pal <- c(
+  "Atlantic Salmon"                 = "#D55E00",
+  "S. Bluefin Tuna"                 = "#0072B2",
+  "Oysters"                         = "#5C0099",
+  "Mussel"                          = "#9B4DD4",
+  "Prawn"                           = "#E69F00",
+  "Cherax / Red Claw"               = "#CC6677",
+  "Barramundi"                      = "#009E73",
+  "Native Finfish"                  = "#4DC4A3",
+  "Land-based finfish polyculture"  = "#005240",   
+  "Abalone"                         = "#AE017E"
+)
+
+# Paul Tol-style state palette (colourblind-safe)
+state_pal <- c(
+  NSW = "#332288", VIC = "#117733", QLD = "#DDCC77",
+  SA  = "#CC6677", WA  = "#88CCEE", TAS = "#AA4499", NT = "#44AA99"
+)
+
+# Display name mapping (species column → human-readable label)
+display_name <- function(x) {
+  case_when(
+    x == "Edible Oyster (aggregated)"         ~ "Oysters",
+    x == "Mussel (aggregated)"                ~ "Mussel",
+    x == "Southern Bluefin Tuna (aggregated)" ~ "S. Bluefin Tuna",
+    x == "Cherax spp."                        ~ "Cherax / Red Claw",
+    x == "Red Claw Crayfish"                  ~ "Cherax / Red Claw",
+    x == "Native finfish"                     ~ "Native Finfish",
+    TRUE ~ x
+  )
+}
+
+# Shared theme for all three plots
+thesis_theme <- theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor    = element_blank(),
+    plot.title          = element_text(face = "bold", size = 12),
+    plot.title.position = "plot",
+    plot.subtitle       = element_text(colour = "grey40", size = 10),
+    legend.position     = "right",
+    strip.text          = element_text(face = "bold")
+  )
+
+
+# =============================================================================
+# FIGURE 1: Gini vs total infrastructure area (headline figure)
+# =============================================================================
+fig1_df <- species_gini_clean %>%
+  mutate(display_species = display_name(species),
+         has_colour      = display_species %in% names(species_pal)) %>%
+  group_by(realm, display_species) %>%
+  summarise(
+    # Compute weighted Gini FIRST, before total_infra_km2 gets shadowed
+    gini_area          = weighted.mean(gini_area, total_infra_km2),
+    total_infra_km2    = sum(total_infra_km2),
+    n_detections_total = sum(n_detections_total),
+    has_colour         = first(has_colour),
+    .groups = "drop"
+  )
+
+gini_ceiling <- 6/7
+
+p1 <- ggplot(fig1_df,
+             aes(x = total_infra_km2, y = gini_area,
+                 size = n_detections_total)) +
+  geom_hline(yintercept = gini_ceiling, linetype = "dashed",
+             colour = "grey40", linewidth = 0.4) +
+  annotate("text", x = max(fig1_df$total_infra_km2),
+           y = gini_ceiling + 0.015,
+           label = paste0("Gini ceiling (", round(gini_ceiling, 3),
+                          ") = single-state concentration"),
+           hjust = 1, vjust = 0, size = 3, colour = "grey40",
+           fontface = "italic") +
+  geom_point(data = filter(fig1_df, !has_colour),
+             colour = "grey65", alpha = 0.5, shape = 16) +
+  geom_point(data = filter(fig1_df, has_colour),
+             aes(colour = display_species), alpha = 0.9) +
+  geom_text_repel(
+    data = filter(fig1_df, has_colour | total_infra_km2 > 0.5),
+    aes(label = display_species),
+    size = 3.2, min.segment.length = 0, max.overlaps = 20,
+    box.padding = 0.5, point.padding = 0.3, seed = 42
+  ) +
+  scale_x_log10(labels = number_format(accuracy = 0.01),
+                breaks = c(0.01, 0.1, 1, 10)) +
+  scale_size_continuous(range = c(2, 10),
+                        name = "n detections",
+                        breaks = c(10, 100, 1000)) +
+  scale_colour_manual(values = species_pal, name = "Species") +
+  guides(colour = guide_legend(override.aes = list(size = 4))) +
+  labs(
+    x = expression("Detected infrastructure area (km"^2*", log scale)"),
+    y = expression(Gini[area]),
+    title = "Spatial concentration of Australian aquaculture species",
+    subtitle = "Each point is a species; line marks the theoretical maximum concentration for 7 states"
+  ) +
+  thesis_theme
+
+ggsave(file.path(fig_dir, "fig1_gini_vs_area.pdf"), p1,
+       width = 260, height = 180, units = "mm", device = cairo_pdf)
+ggsave(file.path(fig_dir, "fig1_gini_vs_area.png"), p1,
+       width = 260, height = 180, units = "mm", dpi = 300)
+p1
+
+
+# =============================================================================
+# FIGURE 2: Lorenz curves for five standout species
+# Oysters, Prawn, Atlantic Salmon, Southern Bluefin Tuna, Barramundi
+# =============================================================================
+lorenz_species <- c(
+  "Edible Oyster (aggregated)",
+  "Prawn",
+  "Atlantic Salmon",
+  "Southern Bluefin Tuna (aggregated)",
+  "Barramundi"
+)
+
+# Optional: enforce a visual order (most → least distributed)
+lorenz_order <- c("Oysters", "Barramundi", "Prawn",
+                  "Atlantic Salmon", "S. Bluefin Tuna")
+
+lorenz_df <- species_shares %>%
+  filter(species %in% lorenz_species) %>%
+  mutate(display_species = display_name(species)) %>%
+  arrange(display_species, share_area_pct) %>%
+  group_by(display_species) %>%
+  mutate(
+    cum_state = seq_len(n()) / n(),
+    cum_area  = cumsum(share_area_pct) / 100
+  ) %>%
+  ungroup() %>%
+  # Prepend origin point (0,0) per species for proper step curve start
+  bind_rows(
+    tibble(display_species = unique(.$display_species),
+           cum_state = 0, cum_area = 0)
+  ) %>%
+  arrange(display_species, cum_state)
+
+# Pull Gini values for panel labels
+gini_labels <- species_gini_clean %>%
+  filter(species %in% lorenz_species) %>%
+  mutate(display_species = display_name(species),
+         label = paste0(display_species, "\n(Gini = ",
+                        sprintf("%.3f", gini_area), ")")) %>%
+  select(display_species, label)
+
+lorenz_df <- lorenz_df %>%
+  left_join(gini_labels, by = "display_species") %>%
+  # Order panels by decreasing "distribution breadth" (lower Gini = first)
+  mutate(display_species = factor(display_species, levels = lorenz_order),
+         label = factor(label,
+                        levels = gini_labels$label[match(lorenz_order,
+                                                         gini_labels$display_species)]))
+
+# Colour map using the main palette
+lorenz_colours <- c(
+  "Oysters"         = unname(species_pal["Oysters"]),
+  "Barramundi"      = unname(species_pal["Barramundi"]),
+  "Prawn"           = unname(species_pal["Prawn"]),
+  "Atlantic Salmon" = unname(species_pal["Atlantic Salmon"]),
+  "S. Bluefin Tuna" = unname(species_pal["S. Bluefin Tuna"])
+)
+
+p2 <- ggplot(lorenz_df, aes(cum_state, cum_area, colour = display_species)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed",
+              colour = "grey70", linewidth = 0.4) +
+  geom_step(linewidth = 1.1, direction = "vh") +
+  geom_point(size = 2.3) +
+  facet_wrap(~label, ncol = 3) +
+  scale_x_continuous(labels = percent, expand = c(0.02, 0.02),
+                     breaks = c(0, 0.5, 1)) +
+  scale_y_continuous(labels = percent, expand = c(0.02, 0.02),
+                     breaks = c(0, 0.5, 1)) +
+  scale_colour_manual(values = lorenz_colours, guide = "none") +
+  labs(
+    x = "Cumulative share of states (ordered least → most infrastructure)",
+    y = "Cumulative share of detected infrastructure area",
+    title = "Lorenz curves: how aquaculture accumulates across states",
+    subtitle = "Curves bowed further from the diagonal indicate greater spatial concentration; five major species shown"
+  ) +
+  thesis_theme +
+  theme(
+    panel.spacing     = unit(1.2, "lines"),
+    strip.text        = element_text(face = "bold", lineheight = 1.1),
+    axis.text         = element_text(size = 9)
+  )
+
+ggsave(file.path(fig_dir, "fig2_lorenz_curves.pdf"), p2,
+       width = 260, height = 180, units = "mm", device = cairo_pdf)
+ggsave(file.path(fig_dir, "fig2_lorenz_curves.png"), p2,
+       width = 260, height = 180, units = "mm", dpi = 300)
+p2
+p2
+
+
+# =============================================================================
+# FIGURE 3: State composition per species (ranked stacked bar)
+# =============================================================================
+fig3_df <- species_shares %>%
+  mutate(display_species = display_name(species)) %>%
+  # Collapse Cherax + Red Claw
+  group_by(realm, display_species, state) %>%
+  summarise(infra_km2 = sum(infra_km2), .groups = "drop") %>%
+  group_by(realm, display_species) %>%
+  mutate(
+    total_km2       = sum(infra_km2),
+    share_area_pct  = 100 * infra_km2 / total_km2
+  ) %>%
+  ungroup() %>%
+  filter(total_km2 > 0.05) %>%  # drop tiny trace categories for readability
+  mutate(state = factor(state, levels = names(state_pal)))
+
+p3 <- ggplot(fig3_df,
+             aes(x = share_area_pct,
+                 y = reorder(display_species, total_km2),
+                 fill = state)) +
+  geom_col(position = "stack", width = 0.75, colour = "white",
+           linewidth = 0.2) +
+  facet_grid(realm ~ ., scales = "free_y", space = "free_y") +
+  scale_fill_manual(values = state_pal, name = "State / Territory") +
+  scale_x_continuous(labels = percent_format(scale = 1),
+                     expand = c(0, 0),
+                     breaks = c(0, 25, 50, 75, 100)) +
+  labs(
+    x = "Share of species' national infrastructure area (%)",
+    y = NULL,
+    title = "State-level composition of Australian aquaculture species",
+    subtitle = "Species ordered by total detected infrastructure area within each realm"
+  ) +
+  thesis_theme +
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    axis.text.y        = element_text(size = 10)
+  )
+
+ggsave(file.path(fig_dir, "fig3_state_composition.pdf"), p3,
+       width = 260, height = 180, units = "mm", device = cairo_pdf)
+ggsave(file.path(fig_dir, "fig3_state_composition.png"), p3,
+       width = 260, height = 180, units = "mm", dpi = 300)
+p3
+
+# ---- Summary of files saved -----------------------------------------------
+cat("\nFigures saved to:\n", fig_dir, "\n\n")
+cat(list.files(fig_dir), sep = "\n")
+```
+```{r}
+library(patchwork)
+combined <- (p1 / (p2 | p3)) +
+  plot_annotation(tag_levels = "a",
+                  tag_suffix = ")") &
+  theme(plot.tag = element_text(face = "bold", size = 12))
+
+ggsave(file.path(fig_dir, "figN_combined_panel.pdf"), combined,
+       width = 260, height = 330, units = "mm", device = cairo_pdf)
+ggsave(file.path(fig_dir, "figN_combined_panel.png"), combined,
+       width = 260, height = 330, units = "mm", dpi = 300)
+combined
+```
+
+
+#Figure N. Spatial concentration of detected aquaculture infrastructure across Australia's seven states and territories.(a) Gini concentration versus production footprint. Each point represents a single-species or defined-polyculture category; labelled points highlight the most abundant species. The dashed line at Gini = 0.857 marks the mathematical maximum for seven states.(b) Cumulative distribution of infrastructure across states (Lorenz curves) for five major species. Panels are ordered by increasing concentration: edible oysters are the most distributed, followed by barramundi and prawn; Atlantic salmon and southern bluefin tuna are completely concentrated in a single state.(c) Percentage share of each species' national infrastructure footprint contributed by each state, faceted by realm. Species within each realm are ordered by total detected area.
+
+#Figure 1. Spatial concentration of detected Australian aquaculture species. Area-weighted Gini coefficient (y-axis) plotted against total detected infrastructure area (x-axis, log scale) for each single-species or defined-polyculture category (n = 21). Point size is proportional to the number of detected infrastructure features contributing to each species' total. Points are coloured for the most abundant species; smaller-area categories are shown in grey. The dashed horizontal line marks the theoretical maximum Gini value of 0.857, corresponding to complete concentration of a species within a single state or territory given Australia's seven administrative units. Sixteen of twenty-one species sit at this ceiling, indicating exclusive single-state production; edible oysters (Gini = 0.597) represent the most geographically dispersed species nationally.
+
+#Figure 2. Lorenz curves of infrastructure distribution across states for five major Australian aquaculture species. Each panel shows the cumulative share of detected infrastructure area (y-axis) against the cumulative share of states (x-axis), with states ordered from least to most infrastructure. The dashed diagonal represents perfect spatial equality (Gini = 0); curves bowed further below the diagonal indicate stronger concentration. Panels are ordered by decreasing distribution breadth: edible oysters (Gini = 0.597) span five states with no single dominant state contributing more than 41% of national area; barramundi (Gini = 0.676) shows a bi-state pattern across Queensland and the Northern Territory; prawn (Gini = 0.831) is heavily Queensland-dominant but with minor New South Wales presence; Atlantic salmon and southern bluefin tuna (Gini = 0.857) each occur exclusively in a single state, producing the vertical step function at the final state.
+
+#Figure 3. State-level composition of each Australian aquaculture species' national infrastructure footprint. Horizontal stacked bars show the percentage of each species' total detected infrastructure area contributed by each of Australia's seven states and territories. Species are ordered by decreasing national infrastructure area within each realm (marine, land-based) and faceted separately. Single-state species appear as solid bars (e.g., Atlantic salmon in Tasmania, southern bluefin tuna in South Australia), while multi-state species show visible banding (e.g., edible oysters across New South Wales, Queensland, South Australia, Tasmania, and Western Australia). Categories contributing less than 0.05 km² to national detected infrastructure are omitted for readability.
+

@@ -1,0 +1,654 @@
+---
+title: "Australian Land-Based Aquaculture Sites & Pond Detection"
+subtitle: "Spatial Analysis of NDWI-Derived Ponds within Official Aquaculture Leases"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+date: today
+format: 
+  html:
+    toc: true
+    toc-location: left
+    toc-depth: 3
+    code-fold: true
+    code-tools: true
+    code-summary: "Show code"
+    theme: cosmo
+    embed-resources: true
+    smooth-scroll: true
+    fig-width: 10
+    fig-height: 8
+    df-print: paged
+execute:
+  warning: false
+  message: false
+  cache: false
+---
+
+## Executive Summary
+
+This analysis identifies and maps aquaculture ponds across Australia using Google Earth Engine-derived NDWI (Normalized Difference Water Index) data from 2021-2022. The study focuses exclusively on **land-based aquaculture sites** across seven Australian states.
+
+:::{.callout-note}
+## Key Findings
+- Analysis covers: QLD, NSW, SA, WA, TAS, VIC, and NT
+- Data source: NDWI satellite imagery (2021-2022)
+- Focus: Land-based aquaculture sites only
+:::
+
+---
+
+## 1. Setup & Data Preparation
+
+### Load Required Libraries
+
+```{r setup}
+#| code-fold: false
+
+library(here)
+library(sf)
+library(tmap)
+library(dplyr)
+library(viridis)
+library(knitr)
+library(DT)
+
+# Set random seed for reproducibility
+set.seed(123)
+```
+
+### Define Project Parameters
+
+```{r parameters}
+#| code-fold: false
+
+# Australian states to process
+STATES <- c("QLD", "WA", "SA", "TAS", "VIC", "NT", "NSW")
+
+# Coordinate Reference System - Australian Albers
+AUS_ALBERS <- "EPSG:3577"
+
+# Output directory
+OUTPUT_DIR <- here("output_data", "ponds_in_sites")
+
+# Create output directory if needed
+if (!dir.exists(OUTPUT_DIR)) {
+  dir.create(OUTPUT_DIR, recursive = TRUE)
+}
+```
+
+---
+
+## 2. Data Processing Pipeline
+
+### 2.1 Processing Function
+
+This function processes each state individually to:
+1. Load NDWI-derived pond polygons from Google Earth Engine
+2. Load land-based aquaculture sites
+3. Transform to Australian Albers projection
+4. Dissolve pond geometries
+5. Intersect ponds with land sites
+6. Export results as shapefiles
+
+```{r process-function}
+process_ponds_by_state <- function() {
+  
+  # Create output directory if it doesn't exist
+  output_dir <- here("output_data", "ponds_in_sites")
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  # Initialize results tracking
+  results <- data.frame(
+    State = character(),
+    Ponds_Found = integer(),
+    Land_Sites = integer(),
+    Ponds_In_Sites = integer(),
+    Status = character(),
+    stringsAsFactors = FALSE
+  )
+  
+  # Process each state
+  for (state in STATES) {
+    
+    cat("\n", rep("=", 60), "\n")
+    cat("Processing state:", state, "\n")
+    cat(rep("=", 60), "\n")
+    
+    # Define file paths
+    pond_file <- here("output_data", "Australian_NDWI_aqua_ponds", "2021_2022", 
+                      paste0("ndwi_sum_thresh_vector_", state, "_aqua_21_22.shp"))
+    
+    land_sites_file <- here("output_data",  
+                            "Australian_Aqua_sites",
+                            paste0(state, "_land_sites.shp"))
+    
+    # Check if pond file exists
+    if (!file.exists(pond_file)) {
+      cat("  ⚠️  Warning: Pond file not found - skipping\n")
+      results <- rbind(results, data.frame(
+        State = state, Ponds_Found = 0, Land_Sites = 0, 
+        Ponds_In_Sites = 0, Status = "No pond file"
+      ))
+      next
+    }
+    
+    # Check if land sites file exists
+    if (!file.exists(land_sites_file)) {
+      cat("  ⚠️  Warning: No land sites file found - skipping\n")
+      results <- rbind(results, data.frame(
+        State = state, Ponds_Found = NA, Land_Sites = 0, 
+        Ponds_In_Sites = 0, Status = "No land sites file"
+      ))
+      next
+    }
+    
+    tryCatch({
+      # Load ponds
+      cat("  📥 Loading pond shapefile...\n")
+      ponds <- st_read(pond_file, quiet = TRUE)
+      
+      # Transform ponds to Australian Albers
+      cat("  🔄 Transforming ponds to Australian Albers...\n")
+      ponds <- st_transform(ponds, crs = AUS_ALBERS)
+      
+      # Check if there are any pond features
+      if (nrow(ponds) == 0) {
+        cat("  ⚠️  Warning: No pond features found - skipping\n")
+        results <- rbind(results, data.frame(
+          State = state, Ponds_Found = 0, Land_Sites = NA, 
+          Ponds_In_Sites = 0, Status = "Empty pond file"
+        ))
+        next
+      }
+      
+      # Load ONLY land-based sites
+      cat("  📥 Loading land-based sites...\n")
+      land_sites <- st_read(land_sites_file, quiet = TRUE) %>%
+        st_transform(crs = AUS_ALBERS) %>%
+        st_make_valid() %>%
+        mutate(lease_type = "land_based")
+      
+      cat("    ✓ Found", nrow(land_sites), "land-based sites\n")
+      
+      # Check if there are any site features
+      if (nrow(land_sites) == 0) {
+        cat("  ⚠️  Warning: No land site features found - skipping\n")
+        results <- rbind(results, data.frame(
+          State = state, Ponds_Found = nrow(ponds), Land_Sites = 0, 
+          Ponds_In_Sites = 0, Status = "Empty land sites file"
+        ))
+        next
+      }
+      
+      # Dissolve ponds (union all pond geometries)
+      cat("  🔗 Dissolving ponds...\n")
+      ponds_dissolved <- ponds %>%
+        summarise(geometry = st_union(geometry)) %>%
+        st_cast("POLYGON")
+      
+      # Intersect ponds with land-based sites
+      cat("  ✂️  Intersecting ponds with land-based sites...\n")
+      ponds_in_sites <- st_intersection(ponds_dissolved, land_sites)
+      
+      # Check if intersection produced any results
+      if (nrow(ponds_in_sites) == 0) {
+        cat("  ⚠️  Warning: No ponds found within land sites\n")
+        results <- rbind(results, data.frame(
+          State = state, Ponds_Found = nrow(ponds), 
+          Land_Sites = nrow(land_sites), 
+          Ponds_In_Sites = 0, Status = "No intersection"
+        ))
+      } else {
+        cat("  ✅ Found", nrow(ponds_in_sites), "pond features within land sites\n")
+        results <- rbind(results, data.frame(
+          State = state, Ponds_Found = nrow(ponds), 
+          Land_Sites = nrow(land_sites), 
+          Ponds_In_Sites = nrow(ponds_in_sites), 
+          Status = "Success"
+        ))
+      }
+      
+      # Define output file path
+      output_file <- here(output_dir, paste0("ponds_in_sites_in_", state, ".shp"))
+      
+      # Save as shapefile
+      cat("  💾 Saving results...\n")
+      st_write(ponds_in_sites, output_file, delete_layer = TRUE, quiet = TRUE)
+      
+      cat("  ✅ Successfully processed", state, "\n")
+      
+      # Calculate and display total area
+      if (nrow(ponds_in_sites) > 0) {
+        total_area <- sum(st_area(ponds_in_sites))
+        cat("  📊 Total pond area:", format(total_area, scientific = FALSE), "sq meters\n")
+      }
+      
+    }, error = function(e) {
+      cat("  ❌ Error processing", state, ":", e$message, "\n")
+      results <- rbind(results, data.frame(
+        State = state, Ponds_Found = NA, Land_Sites = NA, 
+        Ponds_In_Sites = 0, Status = paste("Error:", e$message)
+      ))
+    })
+  }
+  
+  cat("\n", rep("=", 60), "\n")
+  cat("Processing complete!\n")
+  cat(rep("=", 60), "\n\n")
+  
+  return(results)
+}
+```
+
+### 2.2 Execute Processing
+
+```{r run-processing}
+#| output: true
+
+# Run the processing function
+processing_results <- process_ponds_by_state()
+
+# Display results table
+kable(processing_results, 
+      caption = "Processing Summary by State",
+      col.names = c("State", "Ponds Found", "Land Sites", 
+                    "Ponds in Sites", "Status"))
+```
+
+---
+
+## 3. Interactive Mapping
+
+### 3.1 Load Spatial Data for Mapping
+
+```{r load-spatial-data}
+#| output: false
+
+cat("Loading Australia base layers...\n")
+
+# Load Australian state boundaries
+AUS_states <- st_read(here("raw_data/AustralianStates_SHP/STE_2021_AUST_GDA2020.shp")) %>%
+  st_make_valid() %>%
+  st_transform(3577) %>%
+  filter(!st_is_empty(geometry))
+
+cat("✓ State boundaries loaded\n\n")
+
+# Function to load land sites
+load_land_sites <- function(state) {
+  land_sites_file <- here("raw_data/copy_aquaculture_leases/Australian_Aqua_leases",
+                          paste0(state, "_land_sites.shp"))
+  
+  if (!file.exists(land_sites_file)) {
+    return(NULL)
+  }
+  
+  tryCatch({
+    land_sites <- st_read(land_sites_file, quiet = TRUE) %>%
+      st_make_valid() %>%
+      st_transform(3577) %>%
+      filter(!st_is_empty(geometry)) %>%
+      mutate(lease_type = "land_based", State = state) %>%
+      select(lease_type, State, geometry)
+    
+    cat("  ✓", state, ":", nrow(land_sites), "land sites\n")
+    return(land_sites)
+    
+  }, error = function(e) {
+    cat("  ✗", state, ": Error loading\n")
+    return(NULL)
+  })
+}
+
+# Function to load ponds
+load_ponds <- function(state) {
+  ponds_file <- here("output_data/ponds_in_sites", 
+                     paste0("ponds_in_sites_in_", state, ".shp"))
+  
+  if (!file.exists(ponds_file)) {
+    return(NULL)
+  }
+  
+  tryCatch({
+    ponds <- st_read(ponds_file, quiet = TRUE) %>%
+      st_make_valid() %>%
+      st_transform(3577) %>%
+      filter(!st_is_empty(geometry)) %>%
+      mutate(State = state) %>%
+      select(geometry, any_of(c("lease_type", "State")))
+    
+    cat("  ✓", state, ":", nrow(ponds), "ponds\n")
+    return(ponds)
+    
+  }, error = function(e) {
+    return(NULL)
+  })
+}
+
+# Load all data
+cat("\nLoading land-based sites:\n")
+land_sites_list <- setNames(lapply(STATES, load_land_sites), STATES)
+land_sites_list <- land_sites_list[!sapply(land_sites_list, is.null)]
+
+cat("\nLoading ponds:\n")
+ponds_list <- setNames(lapply(STATES, load_ponds), STATES)
+ponds_list <- ponds_list[!sapply(ponds_list, is.null)]
+
+cat("\n✓ Spatial data loading complete\n")
+```
+
+### 3.2 Create Interactive Map
+
+```{r create-map}
+#| fig-cap: "Interactive map of Australian land-based aquaculture sites and detected ponds"
+#| column: page
+
+# Set tmap to interactive mode
+tmap_mode("view")
+
+# Define color palette
+state_colors <- viridis(7)
+names(state_colors) <- STATES
+
+# Start with basemap
+comprehensive_map <- tm_basemap("Esri.WorldImagery") +
+  tm_shape(AUS_states) +
+  tm_borders(col = 'white', alpha = 0.3, lwd = 0.5)
+
+# Add land-based sites for each state
+for (state in STATES) {
+  if (state %in% names(land_sites_list) && 
+      !is.null(land_sites_list[[state]]) && 
+      nrow(land_sites_list[[state]]) > 0) {
+    
+    comprehensive_map <- comprehensive_map +
+      tm_shape(land_sites_list[[state]]) +
+      tm_borders(col = state_colors[state], lwd = 2, alpha = 0.8) +
+      tm_fill(col = state_colors[state], alpha = 0.2, 
+              id = paste(state, "Land Sites"),
+              popup.vars = c("State", "lease_type"))
+  }
+}
+
+# Add ponds with high visibility
+pond_color <- "#FFFF00"  # Bright yellow
+
+for (state in STATES) {
+  if (state %in% names(ponds_list) && 
+      !is.null(ponds_list[[state]]) && 
+      nrow(ponds_list[[state]]) > 0) {
+    
+    comprehensive_map <- comprehensive_map +
+      tm_shape(ponds_list[[state]]) +
+      tm_fill(col = pond_color, alpha = 0.8, 
+              id = paste(state, "Ponds"),
+              popup.vars = "State") +
+      tm_borders(col = "red", lwd = 1)
+  }
+}
+
+# Add layout
+comprehensive_map <- comprehensive_map +
+  tm_layout(
+    title = "Australia's Land-Based Aquaculture Sites & Detected Ponds",
+    legend.outside = TRUE,
+    legend.outside.position = "right"
+  ) +
+  tm_view(set.view = c(lon = 133.7751, lat = -25.2744, zoom = 5))
+
+# Display map
+comprehensive_map
+```
+
+:::{.callout-tip}
+## How to Use the Map
+- **Zoom**: Scroll or use +/- buttons
+- **Pan**: Click and drag
+- **Layers**: Toggle basemap using layer control (top right)
+- **Details**: Click on features to see popup information
+:::
+
+---
+
+## 4. Results & Statistics
+
+### 4.1 Summary by State
+
+```{r summary-stats}
+#| column: page
+
+# Calculate statistics
+summary_stats <- data.frame(
+  State = STATES,
+  Land_Sites = sapply(STATES, function(state) {
+    if (state %in% names(land_sites_list) && !is.null(land_sites_list[[state]])) {
+      nrow(land_sites_list[[state]])
+    } else {
+      0
+    }
+  }),
+  Ponds = sapply(STATES, function(state) {
+    if (state %in% names(ponds_list) && !is.null(ponds_list[[state]])) {
+      nrow(ponds_list[[state]])
+    } else {
+      0
+    }
+  })
+)
+
+# Add totals
+summary_stats <- rbind(
+  summary_stats,
+  data.frame(
+    State = "TOTAL",
+    Land_Sites = sum(summary_stats$Land_Sites),
+    Ponds = sum(summary_stats$Ponds)
+  )
+)
+
+# Display interactive table
+datatable(summary_stats, 
+          caption = "Summary Statistics: Land-Based Sites and Ponds by State",
+          options = list(
+            pageLength = 10,
+            dom = 't',
+            columnDefs = list(list(className = 'dt-center', targets = 1:2))
+          ),
+          rownames = FALSE) %>%
+  formatStyle('State',
+              target = 'row',
+              fontWeight = styleEqual('TOTAL', 'bold')) %>%
+  formatStyle(c('Land_Sites', 'Ponds'),
+              background = styleColorBar(summary_stats$Ponds, 'lightblue'),
+              backgroundSize = '100% 90%',
+              backgroundRepeat = 'no-repeat',
+              backgroundPosition = 'center')
+```
+
+### 4.2 Visual Summary
+
+```{r plot-summary}
+#| fig-width: 10
+#| fig-height: 5
+#| fig-cap: "Comparison of land sites and ponds across Australian states"
+
+library(ggplot2)
+library(tidyr)
+
+# Prepare data for plotting (exclude TOTAL row)
+plot_data <- summary_stats %>%
+  filter(State != "TOTAL") %>%
+  pivot_longer(cols = c(Land_Sites, Ponds), 
+               names_to = "Type", 
+               values_to = "Count")
+
+# Create bar plot
+ggplot(plot_data, aes(x = State, y = Count, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.8) +
+  scale_fill_viridis_d(labels = c("Land Sites", "Ponds")) +
+  labs(
+    title = "Land-Based Aquaculture Sites and Ponds by State",
+    subtitle = "Comparison across Australian jurisdictions",
+    x = "State",
+    y = "Count",
+    fill = "Feature Type"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12),
+    axis.text.x = element_text(size = 11),
+    legend.position = "bottom"
+  )
+```
+
+### 4.3 Coverage Analysis
+
+```{r coverage-analysis}
+# Calculate coverage percentages
+coverage_data <- summary_stats %>%
+  filter(State != "TOTAL") %>%
+  mutate(
+    Has_Data = Land_Sites > 0 | Ponds > 0,
+    Has_Both = Land_Sites > 0 & Ponds > 0
+  )
+
+total_states <- nrow(coverage_data)
+states_with_data <- sum(coverage_data$Has_Data)
+states_with_both <- sum(coverage_data$Has_Both)
+```
+
+:::{.callout-important}
+## Coverage Statistics
+- **States analyzed**: `r total_states`
+- **States with data**: `r states_with_data` (`r round(100*states_with_data/total_states, 1)`%)
+- **States with both sites and ponds**: `r states_with_both` (`r round(100*states_with_both/total_states, 1)`%)
+:::
+
+---
+
+## 5. Export & Save Results
+
+### 5.1 Save Interactive Map
+
+```{r save-map}
+#| output: true
+
+# Create output directory
+output_dir <- here("output_data", "comprehensive_maps")
+dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
+
+# Save map
+tryCatch({
+  tmap_save(comprehensive_map, 
+            filename = here(output_dir, "australia_land_sites_and_ponds.html"),
+            selfcontained = TRUE)
+  cat("✅ Interactive map saved successfully to:\n")
+  cat("   ", here(output_dir, "australia_land_sites_and_ponds.html"), "\n")
+}, error = function(e) {
+  cat("❌ Error saving HTML map:", conditionMessage(e), "\n")
+  cat("Trying alternative save method...\n")
+  
+  # Alternative: save using htmlwidgets
+  tryCatch({
+    htmlwidgets::saveWidget(
+      tmap_leaflet(comprehensive_map),
+      file = here(output_dir, "australia_land_sites_and_ponds.html"),
+      selfcontained = TRUE
+    )
+    cat("✅ Map saved using alternative method!\n")
+  }, error = function(e2) {
+    cat("❌ Alternative save also failed:", conditionMessage(e2), "\n")
+  })
+})
+```
+
+### 5.2 Save Summary Statistics
+
+```{r save-stats}
+#| output: true
+
+# Save summary statistics as CSV
+stats_file <- here(output_dir, "summary_statistics.csv")
+write.csv(summary_stats, stats_file, row.names = FALSE)
+
+cat("✅ Summary statistics saved to:\n")
+cat("   ", stats_file, "\n")
+```
+
+---
+
+## 6. Methods & Data Sources
+
+### Data Sources
+
+1. **Pond Detection**
+   - Source: Google Earth Engine NDWI analysis
+   - Time period: 2021-2022
+   - Method: NDWI sum threshold vectorization
+   - Location: `output_data/Australian_NDWI_aqua_ponds/2021_2022/`
+
+2. **Aquaculture Sites**
+   - Source: Australian state government aquaculture lease databases
+   - Type: Land-based aquaculture sites only
+   - Location: `raw_data/copy_aquaculture_leases/Australian_Aqua_leases/`
+
+3. **State Boundaries**
+   - Source: Australian Bureau of Statistics
+   - Year: 2021
+   - CRS: GDA2020
+
+### Methodology
+
+1. **Projection**: All spatial data transformed to Australian Albers (EPSG:3577)
+2. **Pond Processing**: Dissolved pond geometries to create unified features
+3. **Intersection**: Spatial intersection of ponds with land-based sites
+4. **Validation**: Geometries validated using `st_make_valid()`
+
+### Software
+
+- **R version**: `r R.version.string`
+- **Key packages**:
+  - sf: `r packageVersion("sf")`
+  - tmap: `r packageVersion("tmap")`
+  - dplyr: `r packageVersion("dplyr")`
+
+---
+
+## 7. Conclusions
+
+This analysis successfully identified and mapped aquaculture ponds within official land-based aquaculture sites across Australia. The results provide a comprehensive view of the spatial distribution of aquaculture operations and can inform:
+
+- Resource management decisions
+- Environmental monitoring
+- Industry development planning
+- Research on aquaculture extent and growth
+
+:::{.callout-note}
+## Next Steps
+- Temporal analysis comparing multiple years
+- Pond size distribution analysis
+- Species-specific site analysis
+- Integration with production data
+:::
+
+---
+
+## Appendix: Session Information
+
+```{r session-info}
+sessionInfo()
+```
+
+---
+
+**Report generated**: `r Sys.time()`
+
+**Contact**: [marina.christofidis@griffithuni.edu.au/ marina.christofidis@gmail.com]
+
+**License**: [to be filled when we know type]

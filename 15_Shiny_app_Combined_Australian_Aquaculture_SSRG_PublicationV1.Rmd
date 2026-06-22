@@ -1,0 +1,687 @@
+---
+title: "15_Shiny_app_Combined_Australian_Aquaculture"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+#THIS SHINY APP HAS LEASES THEREFORE IS BETTER FOR INTERNAL USE ONLY OF THE SSRG 
+
+date: "2026-04-17"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# About
+
+Shiny app for the Australian Aquaculture Infrastructure dataset.
+
+**Reads:** `output_data/summaries/AU_aquaculture_clean.gpkg`
+
+- Layer `leases` drives all counts, filters, charts and tables
+  (one row per lease, so `nrow()` is a true lease count).
+- Layer `detections` is used only to overlay satellite-detected marine
+  infrastructure on the map.
+
+# Packages
+
+```{r, eval=FALSE}
+install.packages(c("shiny","bslib","bsicons","sf","dplyr","leaflet",
+                   "leaflet.extras","plotly","DT","here","scales","stringr"))
+```
+
+# App
+
+```{r app}
+library(shiny)
+library(bslib)
+library(bsicons)
+library(sf)
+library(dplyr)
+library(stringr)
+library(leaflet)
+library(leaflet.extras)
+library(plotly)
+library(DT)
+library(here)
+library(scales)
+
+clean_geoms <- function(x, target = "MULTIPOLYGON") {
+  id_col <- intersect(c("detection_id", "lease_id"), names(x))[1]
+  get_ids <- function(i) if (!is.na(id_col)) x[[id_col]][i] else as.character(i)
+
+  # 1. Validate and drop empties
+  x <- st_make_valid(x)
+  empty <- st_is_empty(x)
+  if (any(empty)) {
+    message("Dropped ", sum(empty), " empty geometries")
+    x <- x[!empty, ]
+  }
+
+  # 2. Extract polygons from any GEOMETRYCOLLECTIONs
+  gc_idx <- which(st_geometry_type(x) == "GEOMETRYCOLLECTION")
+  if (length(gc_idx) > 0) {
+    extract_type <- sub("^MULTI", "", target)
+    drop_ids <- integer(0)
+    for (i in gc_idx) {
+      ex <- suppressWarnings(st_collection_extract(x[i, ], extract_type))
+      if (nrow(ex) == 0) {
+        drop_ids <- c(drop_ids, i)
+      } else {
+        st_geometry(x)[i] <- suppressWarnings(st_union(ex))
+      }
+    }
+    if (length(drop_ids) > 0) {
+      message("Dropped ", length(drop_ids),
+              " GEOMETRYCOLLECTION feature(s) with no polygon component: ",
+              paste(get_ids(drop_ids), collapse = ", "))
+      x <- x[-drop_ids, ]
+    }
+  }
+
+  # 3. Re-validate, drop empties and non-polygons
+  x <- st_make_valid(x)
+  x <- x[!st_is_empty(x), ]
+  non_poly <- !(st_geometry_type(x) %in% c("POLYGON", "MULTIPOLYGON"))
+  if (any(non_poly)) {
+    message("Dropped ", sum(non_poly), " non-polygon geometries")
+    x <- x[!non_poly, ]
+  }
+
+  # 4. Bulk cast first (fast path); fall back to per-row if it fails
+  result <- tryCatch(suppressWarnings(st_cast(x, target)),
+                     error = function(e) NULL)
+  if (!is.null(result)) return(result)
+
+  message("Bulk cast failed — retrying per-row to isolate degenerate geoms...")
+  ok <- vapply(seq_len(nrow(x)), function(i) {
+    tryCatch({ suppressWarnings(st_cast(x[i, ], target)); TRUE },
+             error = function(e) FALSE)
+  }, logical(1))
+  if (!all(ok)) {
+    message("Dropped ", sum(!ok), " degenerate geometries that failed cast: ",
+            paste(head(get_ids(which(!ok)), 10), collapse = ", "),
+            if (sum(!ok) > 10) paste0(" ...+", sum(!ok) - 10, " more") else "")
+    x <- x[ok, ]
+  }
+  st_cast(x, target)
+}
+
+# =============================================================================
+# 1. LOAD CLEANED DATA
+# =============================================================================
+gpkg <- here("output_data", "summaries", "AU_aquaculture_clean.gpkg")
+
+leases <- st_read(gpkg, layer = "leases", quiet = TRUE) %>%
+  st_transform(4326) %>%
+  clean_geoms()
+
+detections <- st_read(gpkg, layer = "detections", quiet = TRUE) %>%
+  st_transform(4326) %>%
+  clean_geoms()
+
+# Tidy a few edge cases for UI filtering
+leases$subgroup[is.na(leases$subgroup)]     <- "—"
+leases$infra_type[is.na(leases$infra_type)] <- "Unknown"
+leases$species[is.na(leases$species)]       <- "Unknown"
+leases$group[is.na(leases$group)]           <- "Unknown"
+
+# =============================================================================
+# 2. UI CHOICES
+# =============================================================================
+
+choice_realm      <- sort(unique(leases$realm))
+choice_status     <- sort(unique(leases$status))
+choice_infra_type <- sort(unique(leases$infra_type))
+choice_state      <- sort(unique(leases$state))
+choice_group      <- sort(unique(leases$group))
+choice_subgroup   <- sort(unique(leases$subgroup))
+choice_species    <- sort(unique(leases$species))
+
+# =============================================================================
+# 3. COLOUR PALETTES (Paul Tol muted, colourblind-safe)
+# =============================================================================
+
+pal_realm  <- c("Marine" = "#4477AA", "Land-based" = "#117733")
+pal_status <- c("Active" = "#117733", "Inactive"   = "#AA4499")
+
+col_ma <- "#4477AA"  # marine active
+col_mi <- "#99BBDD"  # marine inactive
+col_la <- "#117733"  # land active
+col_li <- "#88CCAA"  # land inactive
+
+# =============================================================================
+# 4. PLOT HELPERS
+# =============================================================================
+
+make_bar <- function(df, group_var, value_var, title,
+                     fill_col = "#4477AA", xlab = "km2") {
+  d <- df %>%
+    filter(!is.na(.data[[group_var]]), !is.na(.data[[value_var]])) %>%
+    group_by(label = .data[[group_var]]) %>%
+    summarise(total = sum(.data[[value_var]], na.rm = TRUE), .groups = "drop") %>%
+    filter(total > 0) %>% arrange(total)
+  if (nrow(d) == 0)
+    return(plotly_empty(type = "bar") %>%
+             layout(title = list(text = title, font = list(size = 12))))
+  plot_ly(d,
+          x = ~total, y = ~label, type = "bar", orientation = "h",
+          marker = list(color = fill_col,
+                        line = list(color = "white", width = 0.4))) %>%
+    layout(title  = list(text = title, font = list(size = 12), x = 0),
+           xaxis  = list(title = xlab, tickformat = ".3f"),
+           yaxis  = list(title = "", automargin = TRUE,
+                         tickfont = list(size = 10)),
+           margin = list(l = 10, r = 10, t = 40, b = 40),
+           paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)") %>%
+    config(displayModeBar = FALSE)
+}
+
+make_stacked_bar <- function(df, group_var, stack_var, value_var,
+                             title, pal, xlab = "km2") {
+  d <- df %>%
+    filter(!is.na(.data[[group_var]]), !is.na(.data[[stack_var]])) %>%
+    group_by(grp = .data[[group_var]], stk = .data[[stack_var]]) %>%
+    summarise(total = sum(.data[[value_var]], na.rm = TRUE), .groups = "drop") %>%
+    filter(total > 0)
+  if (nrow(d) == 0)
+    return(plotly_empty(type = "bar") %>%
+             layout(title = list(text = title, font = list(size = 12))))
+  lvl_order <- d %>% group_by(grp) %>% summarise(tot = sum(total)) %>%
+    arrange(tot) %>% pull(grp)
+  d$grp <- factor(d$grp, levels = lvl_order)
+  stk_levs <- unique(d$stk)
+  stk_cols <- unname(pal[stk_levs]); stk_cols[is.na(stk_cols)] <- "#AAAAAA"
+  p <- plot_ly()
+  for (i in seq_along(stk_levs)) {
+    sub <- d %>% filter(stk == stk_levs[i])
+    p <- add_trace(p, x = sub$total, y = as.character(sub$grp),
+                   name = stk_levs[i], type = "bar", orientation = "h",
+                   marker = list(color = stk_cols[i]))
+  }
+  p %>% layout(barmode = "stack",
+               title  = list(text = title, font = list(size = 12), x = 0),
+               xaxis  = list(title = xlab, tickformat = ".3f"),
+               yaxis  = list(title = "", automargin = TRUE,
+                             tickfont = list(size = 10)),
+               margin = list(l = 10, r = 10, t = 40, b = 40),
+               legend = list(orientation = "h", y = -0.18),
+               paper_bgcolor = "rgba(0,0,0,0)",
+               plot_bgcolor  = "rgba(0,0,0,0)") %>%
+    config(displayModeBar = FALSE)
+}
+
+# =============================================================================
+# 5. UI
+# =============================================================================
+
+ui <- page_navbar(
+  title = "Australian Aquaculture Infrastructure Explorer",
+  theme = bs_theme(
+    bootswatch   = "flatly",
+    primary      = "#4477AA",
+    success      = "#117733",
+    base_font    = font_google("Roboto"),
+    heading_font = font_google("Roboto")
+  ),
+
+  sidebar = sidebar(
+    width = 275, bg = "#f5f6f7",
+
+    accordion(
+      open = c("Realm & Status", "Geography", "Biology"),
+
+      accordion_panel(
+        "Realm & Status",
+        checkboxGroupInput("sel_realm",  "Realm",
+          choices = choice_realm,      selected = choice_realm),
+        checkboxGroupInput("sel_status", "Status",
+          choices = choice_status,     selected = choice_status),
+        checkboxGroupInput("sel_infra",  "Infrastructure type",
+          choices = choice_infra_type, selected = choice_infra_type)
+      ),
+
+      accordion_panel(
+        "Geography",
+        checkboxGroupInput("sel_state", "State / Territory",
+          choices = choice_state, selected = choice_state)
+      ),
+
+      accordion_panel(
+        "Biology",
+        checkboxGroupInput("sel_group", "Taxonomic group",
+          choices = choice_group, selected = choice_group),
+        checkboxGroupInput("sel_subgroup", "Subgroup (Mollusc only)",
+          choices = choice_subgroup, selected = choice_subgroup),
+        selectizeInput("sel_species", "Species",
+          choices  = c("All species" = "ALL", choice_species),
+          selected = "ALL",
+          multiple = TRUE,
+          options  = list(placeholder = "Select one or more..."))
+      )
+    ),
+
+    accordion_panel(
+      "Map options",
+     checkboxInput("show_dets",
+              "Overlay detected infrastructure",
+              value = TRUE),
+      helpText("Lease polygons are always coloured by realm x status.",
+               "Detections are darker shapes drawn on top.")
+    ),
+
+    hr(),
+    actionButton("reset_btn", "Reset all filters",
+                 class = "btn-outline-secondary btn-sm w-100")
+  ),
+
+  # ── Tab 1 · Map ────────────────────────────────────────────────────────────
+  nav_panel(
+    "Map",
+    layout_columns(
+      col_widths = c(3, 3, 3, 3),
+      value_box(title    = "Leases shown",
+                value    = textOutput("vb_n"),
+                showcase = bs_icon("pin-map-fill"),
+                theme    = value_box_theme(bg = "#6C757D", fg = "white")),
+      value_box(title    = "of which active",
+                value    = textOutput("vb_n_active"),
+                showcase = bs_icon("check2-circle"),
+                theme    = value_box_theme(bg = "#117733", fg = "white")),
+      value_box(title    = "Total lease area",
+                value    = textOutput("vb_lease"),
+                showcase = bs_icon("arrows-fullscreen"),
+                theme    = value_box_theme(bg = "#DDAA33", fg = "white")),
+      value_box(title    = "Total infrastructure area",
+                value    = textOutput("vb_infra"),
+                showcase = bs_icon("grid-fill"),
+                theme    = value_box_theme(bg = "#CC6677", fg = "white"))
+    ),
+    div(style = "display:flex; align-items:center; gap:10px;
+                 padding:6px 4px 2px 4px; font-size:0.85rem;",
+        strong("Basemap:"),
+        radioButtons("basemap", label = NULL,
+                     choices  = c("Light"     = "CartoDB.Positron",
+                                  "Dark"      = "CartoDB.DarkMatter",
+                                  "Satellite" = "Esri.WorldImagery"),
+                     selected = "CartoDB.Positron", inline = TRUE)),
+    leafletOutput("map", height = "62vh")
+  ),
+
+  # ── Tab 2 · Infrastructure area ────────────────────────────────────────────
+  nav_panel(
+    "Infrastructure area",
+    layout_columns(
+      col_widths = c(6, 6),
+      card(card_header("By state x realm"),
+           plotlyOutput("bar_infra_state",   height = "300px")),
+      card(card_header("By realm"),
+           plotlyOutput("bar_infra_realm",   height = "300px"))
+    ),
+    layout_columns(
+      col_widths = c(6, 6),
+      card(card_header("By species"),
+           plotlyOutput("bar_infra_species", height = "300px")),
+      card(card_header("By taxonomic group"),
+           plotlyOutput("bar_infra_group",   height = "300px"))
+    ),
+    layout_columns(
+      col_widths = c(6, 6),
+      card(card_header("By status x state"),
+           plotlyOutput("bar_infra_status",  height = "300px")),
+      card(card_header("By infrastructure type"),
+           plotlyOutput("bar_infra_type",    height = "300px"))
+    )
+  ),
+
+  # ── Tab 3 · Lease area ─────────────────────────────────────────────────────
+  nav_panel(
+    "Lease area",
+    layout_columns(
+      col_widths = c(6, 6),
+      card(card_header("By state x realm"),
+           plotlyOutput("bar_lease_state",   height = "300px")),
+      card(card_header("By realm"),
+           plotlyOutput("bar_lease_realm",   height = "300px"))
+    ),
+    layout_columns(
+      col_widths = c(6, 6),
+      card(card_header("By species"),
+           plotlyOutput("bar_lease_species", height = "300px")),
+      card(card_header("By taxonomic group"),
+           plotlyOutput("bar_lease_group",   height = "300px"))
+    ),
+    layout_columns(
+      col_widths = c(6, 6),
+      card(card_header("By status x state"),
+           plotlyOutput("bar_lease_status",  height = "300px")),
+      card(card_header("By infrastructure type"),
+           plotlyOutput("bar_lease_type",    height = "300px"))
+    )
+  ),
+
+  # ── Tab 4 · Summary table ──────────────────────────────────────────────────
+  nav_panel(
+    "Summary table",
+    card(card_header("Aggregated summary - current filters"),
+         DTOutput("summary_table")),
+    card(card_header("Individual leases - current filters"),
+         DTOutput("records_table"))
+  ),
+
+  # ── Tab 5 · About ──────────────────────────────────────────────────────────
+  nav_panel(
+    "About",
+    card(
+      max_width = "760px",
+      card_header("About this app"),
+      p("This app visualises the national Australian aquaculture
+         infrastructure dataset compiled by the Sustainable Seas Research
+         Group, Griffith University."),
+      tags$ul(
+        tags$li(strong("Leases"), " - one row per licensed lease polygon
+                (land or marine). Areas computed from geometry in EPSG:3577."),
+        tags$li(strong("Infrastructure area"), " - satellite-detected
+                aquaculture structures (ponds, longlines, cages) aggregated
+                per lease."),
+        tags$li(strong("Active"), " - infrastructure detected inside the
+                lease. ", strong("Inactive"), " - lease registered but no
+                detectable infrastructure."),
+        tags$li(strong("Group"), " - Fish, Mollusc, Crustacean, Algae.
+                Bivalves are a subset of Mollusc; see the ",
+                code("subgroup"), " column for Bivalve/Gastropod distinction.")
+      ),
+      p(em("Data: Christofidis et al. (in prep.). Sustainable Seas Research
+           Group, Griffith University."))
+    )
+  )
+)
+
+# =============================================================================
+# 6. SERVER
+# =============================================================================
+
+server <- function(input, output, session) {
+
+  # --- Filtered leases (primary reactive) ------------------------------------
+  fdat <- reactive({
+    d <- leases
+    if (length(input$sel_realm)    > 0) d <- d %>% filter(realm     %in% input$sel_realm)
+    if (length(input$sel_status)   > 0) d <- d %>% filter(status    %in% input$sel_status)
+    if (length(input$sel_infra)    > 0) d <- d %>% filter(infra_type %in% input$sel_infra)
+    if (length(input$sel_state)    > 0) d <- d %>% filter(state     %in% input$sel_state)
+    if (length(input$sel_group)    > 0) d <- d %>% filter(group     %in% input$sel_group)
+    if (length(input$sel_subgroup) > 0) d <- d %>% filter(subgroup  %in% input$sel_subgroup)
+    if (!("ALL" %in% input$sel_species) && length(input$sel_species) > 0)
+      d <- d %>% filter(species %in% input$sel_species)
+    d
+  })
+  fdat_df <- reactive({ fdat() %>% st_drop_geometry() })
+
+  # --- Filtered detections (tied to visible leases) --------------------------
+  fdets <- reactive({
+    visible_ids <- fdat()$lease_id
+    detections %>% filter(lease_id %in% visible_ids)
+  })
+
+  # --- Reset button -----------------------------------------------------------
+  observeEvent(input$reset_btn, {
+    updateCheckboxGroupInput(session, "sel_realm",    selected = choice_realm)
+    updateCheckboxGroupInput(session, "sel_status",   selected = choice_status)
+    updateCheckboxGroupInput(session, "sel_infra",    selected = choice_infra_type)
+    updateCheckboxGroupInput(session, "sel_state",    selected = choice_state)
+    updateCheckboxGroupInput(session, "sel_group",    selected = choice_group)
+    updateCheckboxGroupInput(session, "sel_subgroup", selected = choice_subgroup)
+    updateSelectizeInput    (session, "sel_species",  selected = "ALL")
+    updateRadioButtons      (session, "basemap",      selected = "CartoDB.Positron")
+    updateCheckboxInput     (session, "show_dets",    value = TRUE)
+  })
+
+  # --- Value boxes ------------------------------------------------------------
+  output$vb_n <- renderText({
+    format(nrow(fdat()), big.mark = ",")
+  })
+  output$vb_n_active <- renderText({
+    format(sum(fdat_df()$status == "Active", na.rm = TRUE), big.mark = ",")
+  })
+  output$vb_lease <- renderText({
+    v <- sum(fdat_df()$lease_area_km2, na.rm = TRUE)
+    paste(format(round(v, 1), big.mark = ",", nsmall = 1), "km2")
+  })
+  output$vb_infra <- renderText({
+    v <- sum(fdat_df()$infra_area_km2, na.rm = TRUE)
+    paste(format(round(v, 2), big.mark = ",", nsmall = 2), "km2")
+  })
+
+  # --- Map --------------------------------------------------------------------
+  output$map <- renderLeaflet({
+    leaflet(options = leafletOptions(minZoom = 3)) %>%
+      addProviderTiles(providers$CartoDB.Positron, layerId = "basemap") %>%
+      setView(lng = 134, lat = -27, zoom = 4)
+  })
+
+  observeEvent(input$basemap, {
+    leafletProxy("map") %>%
+      removeTiles(layerId = "basemap") %>%
+      addProviderTiles(input$basemap, layerId = "basemap")
+  })
+
+  observe({
+    d <- fdat()
+    leafletProxy("map") %>% clearShapes() %>% clearControls()
+    if (nrow(d) == 0) return(NULL)
+
+    hi <- highlightOptions(weight = 2, color = "#333333",
+                           fillOpacity = 0.8, bringToFront = TRUE)
+
+    make_popup <- function(x) {
+      paste0(
+        "<b>Lease ID:</b> ",         x$lease_id,       "<br>",
+        "<b>State:</b> ",            x$state,          "<br>",
+        "<b>Realm:</b> ",            x$realm,          "<br>",
+        "<b>Status:</b> ",           x$status,         "<br>",
+        "<b>Infra type:</b> ",       x$infra_type,     "<br>",
+        "<b>Group:</b> ",            x$group,
+        ifelse(x$subgroup == "—", "",
+               paste0(" (", x$subgroup, ")")),         "<br>",
+        "<b>Species:</b> ",          x$species,        "<br>",
+        "<b>Lease area (km2):</b> ", round(x$lease_area_km2, 4), "<br>",
+        "<b>Infra area (km2):</b> ", round(x$infra_area_km2, 4)
+      )
+    }
+
+    # Four lease sub-layers for clear styling
+    d_ma <- d %>% filter(realm == "Marine"     & status == "Active")
+    d_mi <- d %>% filter(realm == "Marine"     & status == "Inactive")
+    d_la <- d %>% filter(realm == "Land-based" & status == "Active")
+    d_li <- d %>% filter(realm == "Land-based" & status == "Inactive")
+
+    proxy <- leafletProxy("map")
+
+    # Inactive first (lighter, bottom)
+    if (nrow(d_mi) > 0)
+      proxy <- proxy %>% addPolygons(
+        data = d_mi, fillColor = col_mi, color = col_mi,
+        weight = 0.8, opacity = 0.8, fillOpacity = 0.35,
+        dashArray = "4 3", popup = make_popup(d_mi),
+        highlightOptions = hi)
+    if (nrow(d_li) > 0)
+      proxy <- proxy %>% addPolygons(
+        data = d_li, fillColor = col_li, color = col_li,
+        weight = 0.8, opacity = 0.8, fillOpacity = 0.35,
+        dashArray = "4 3", popup = make_popup(d_li),
+        highlightOptions = hi)
+    # Active on top (darker, solid)
+    if (nrow(d_ma) > 0)
+      proxy <- proxy %>% addPolygons(
+        data = d_ma, fillColor = col_ma, color = col_ma,
+        weight = 0.6, opacity = 0.9, fillOpacity = 0.55,
+        popup = make_popup(d_ma), highlightOptions = hi)
+    if (nrow(d_la) > 0)
+      proxy <- proxy %>% addPolygons(
+        data = d_la, fillColor = col_la, color = col_la,
+        weight = 0.6, opacity = 0.9, fillOpacity = 0.55,
+        popup = make_popup(d_la), highlightOptions = hi)
+
+# Detection overlay
+    if (isTRUE(input$show_dets)) {
+      dd <- fdets()
+      if (nrow(dd) > 0) {
+        dd_m <- dd %>% filter(realm == "Marine")
+        dd_l <- dd %>% filter(realm == "Land-based")
+
+        det_popup <- function(x) {
+          paste0(
+            "<b>Detection ID:</b> ", x$detection_id, "<br>",
+            "<b>Lease ID:</b> ",     x$lease_id,     "<br>",
+            "<b>Realm:</b> ",        x$realm,        "<br>",
+            "<b>State:</b> ",        x$state,        "<br>",
+            "<b>Infra type:</b> ",   x$infra_type,   "<br>",
+            "<b>Species:</b> ",      x$species,      "<br>",
+            "<b>Infra area (km2):</b> ",
+            round(x$infra_area_km2, 5)
+          )
+        }
+
+        if (nrow(dd_m) > 0)
+          proxy <- proxy %>% addPolygons(
+            data        = dd_m,
+            fillColor   = "#222266",   # dark navy for marine
+            color       = "#222266",
+            weight      = 0.4,
+            opacity     = 0.9,
+            fillOpacity = 0.85,
+            popup       = det_popup(dd_m)
+          )
+
+        if (nrow(dd_l) > 0)
+          proxy <- proxy %>% addPolygons(
+            data        = dd_l,
+            fillColor   = "#332288",   # deep indigo for land ponds
+            color       = "#332288",
+            weight      = 0.3,
+            opacity     = 0.9,
+            fillOpacity = 0.9,
+            popup       = det_popup(dd_l)
+          )
+      }
+    }
+
+    # Legend
+  proxy %>%
+      addLegend(
+        position = "bottomright",
+        colors   = c(col_ma, col_mi, col_la, col_li, "#222266", "#332288"),
+        labels   = c("Marine - Active",     "Marine - Inactive",
+                     "Land-based - Active", "Land-based - Inactive",
+                     "Detected marine infrastructure",
+                     "Detected land ponds"),
+        title    = "Realm x Status",
+        opacity  = 0.9
+      )
+  })
+
+  # --- Infrastructure area charts --------------------------------------------
+  output$bar_infra_state <- renderPlotly({
+    make_stacked_bar(fdat_df(), "state", "realm",
+                     "infra_area_km2", "Infrastructure area by state",
+                     pal_realm)
+  })
+  output$bar_infra_realm <- renderPlotly({
+    make_bar(fdat_df(), "realm", "infra_area_km2",
+             "Infrastructure area by realm", "#4477AA")
+  })
+  output$bar_infra_species <- renderPlotly({
+    make_bar(fdat_df(), "species", "infra_area_km2",
+             "Infrastructure area by species", "#44AA99")
+  })
+  output$bar_infra_group <- renderPlotly({
+    make_bar(fdat_df(), "group", "infra_area_km2",
+             "Infrastructure area by group", "#DDAA33")
+  })
+  output$bar_infra_status <- renderPlotly({
+    make_stacked_bar(fdat_df(), "state", "status",
+                     "infra_area_km2", "Infrastructure area by status x state",
+                     pal_status)
+  })
+  output$bar_infra_type <- renderPlotly({
+    make_bar(fdat_df(), "infra_type", "infra_area_km2",
+             "Infrastructure area by type", "#CC6677")
+  })
+
+  # --- Lease area charts ------------------------------------------------------
+  output$bar_lease_state <- renderPlotly({
+    make_stacked_bar(fdat_df(), "state", "realm",
+                     "lease_area_km2", "Lease area by state", pal_realm)
+  })
+  output$bar_lease_realm <- renderPlotly({
+    make_bar(fdat_df(), "realm", "lease_area_km2",
+             "Lease area by realm", "#4477AA")
+  })
+  output$bar_lease_species <- renderPlotly({
+    make_bar(fdat_df(), "species", "lease_area_km2",
+             "Lease area by species", "#44AA99")
+  })
+  output$bar_lease_group <- renderPlotly({
+    make_bar(fdat_df(), "group", "lease_area_km2",
+             "Lease area by group", "#DDAA33")
+  })
+  output$bar_lease_status <- renderPlotly({
+    make_stacked_bar(fdat_df(), "state", "status",
+                     "lease_area_km2", "Lease area by status x state",
+                     pal_status)
+  })
+  output$bar_lease_type <- renderPlotly({
+    make_bar(fdat_df(), "infra_type", "lease_area_km2",
+             "Lease area by type", "#CC6677")
+  })
+
+  # --- Summary table ----------------------------------------------------------
+  output$summary_table <- renderDT({
+    d <- fdat_df() %>%
+      group_by(state, realm, status, infra_type, group, subgroup, species) %>%
+      summarise(
+        n_leases       = n(),
+        lease_area_km2 = round(sum(lease_area_km2, na.rm = TRUE), 4),
+        infra_area_km2 = round(sum(infra_area_km2, na.rm = TRUE), 4),
+        .groups = "drop"
+      ) %>%
+      arrange(state, realm, status)
+
+    datatable(d, filter = "top", rownames = FALSE,
+              extensions = "Buttons",
+              options = list(pageLength = 20, scrollX = TRUE,
+                             dom = "Bfrtip", buttons = c("csv", "excel")),
+              colnames = c("State","Realm","Status","Infra type",
+                           "Group","Subgroup","Species",
+                           "N leases","Lease area (km2)","Infra area (km2)")) %>%
+      formatStyle("infra_area_km2",
+                  background = styleColorBar(
+                    c(0, max(d$infra_area_km2, na.rm = TRUE)), "#c8dff0"),
+                  backgroundSize = "98% 80%",
+                  backgroundRepeat = "no-repeat",
+                  backgroundPosition = "center")
+  })
+
+  output$records_table <- renderDT({
+    d <- fdat_df() %>%
+      select(lease_id, state, realm, status, infra_type,
+             group, subgroup, species,
+             lease_area_km2, infra_area_km2) %>%
+      mutate(across(c(lease_area_km2, infra_area_km2), ~round(.x, 5)))
+
+    datatable(d, filter = "top", rownames = FALSE,
+              options = list(pageLength = 15, scrollX = TRUE),
+              colnames = c("Lease ID","State","Realm","Status","Infra type",
+                           "Group","Subgroup","Species",
+                           "Lease area (km2)","Infra area (km2)"))
+  })
+}
+
+# =============================================================================
+# 7. RUN
+# =============================================================================
+
+shinyApp(ui, server)
+```

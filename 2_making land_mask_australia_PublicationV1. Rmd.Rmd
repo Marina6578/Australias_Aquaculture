@@ -1,0 +1,91 @@
+---
+title: "2-AU_coastlines"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+date: "2025-09-24"
+---
+#ADD Packages
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+install.packages("geodata")
+```
+
+```{r}
+# Check the column names
+australia_land_temp <- as.polygons(land_mask, values = TRUE) %>%
+  st_as_sf()
+
+names(australia_land_temp)
+
+# It's probably called something else, let's look at the data
+head(australia_land_temp)
+```
+
+#check if these eliminates the estuaries in the land mask
+```{r}
+
+library(terra)
+library(geodata)
+library(sf)
+library(here)
+
+# Download SRTM for full Australia coverage
+aus_dem <- elevation_30s(country = "AUS", path = tempdir())
+
+# Create land mask (elevation > 0)
+land_mask <- aus_dem > 0
+
+# Convert to polygons
+australia_land <- as.polygons(land_mask, values = TRUE) %>%
+  st_as_sf() %>%
+  filter(AUS_elv_msk == 1) %>%  # Changed to correct column name
+  st_transform(3577) %>%
+  st_union() %>%
+  st_make_valid()
+
+# Plot
+plot(st_geometry(australia_land), main = "Australia Land Mask from DEM")
+
+# Save
+st_write(australia_land, here("output_data", "Australia_land.shp"), delete_dsn = TRUE)
+```
+```{r}
+qtm(australia_land)
+```
+
+
+
+```{r}
+library(sf)
+library(dplyr)
+library(here)
+
+# 1. Load your aquaculture polygons (leases, ponds, etc.)
+aquaculture <- st_read(here("input_data", "aquaculture_leases.gpkg"))
+
+# 2. Load Australia land polygon
+australia_land <- st_read(here("output_data", "Australia_land.gpkg"))
+
+# 3. Ensure same CRS
+aquaculture <- st_transform(aquaculture, st_crs(australia_land))
+
+# 4. Keep only **offshore aquaculture** (not intersecting land)
+# st_intersects returns a list of intersecting land features
+on_land <- st_intersects(aquaculture, australia_land, sparse = FALSE)
+# Identify polygons with no intersection with land
+offshore_aqua <- aquaculture[rowSums(on_land) == 0, ]
+
+# 5. Save offshore aquaculture as GeoPackage
+st_write(offshore_aqua, here("output_data", "offshore_aquaculture.gpkg"), delete_dsn = TRUE)
+
+# 6. Optional: Check
+plot(st_geometry(australia_land), col = "lightgreen")
+plot(st_geometry(offshore_aqua), add = TRUE, col = "blue")
+
+```
+

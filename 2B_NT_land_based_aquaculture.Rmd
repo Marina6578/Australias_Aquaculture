@@ -1,0 +1,180 @@
+---
+title: "NSW_land_based_aquaculture"
+output: html_document
+date: "2025-01-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#upload packages
+```{r}
+
+library(tidyverse)
+library(here)
+library(tmap)
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(rgeos)
+library(terra)
+```
+
+#upload the data you need to work with 
+```{r}
+NT_leases<- st_read(here("raw_data/NT_Aquaculture/map_aqua.geojson"))
+```
+
+#now take away columns thata werent necessary #as there were farms repeated with polygons and points group them by farm id
+#and summarize using max before any values to assure the maximum value will be mantained, its ok because most columns are blank when repeated.Otherwise cudl use sum, min, first before the values. 
+```{r}
+
+NT_leases_farm <- NT_leases %>%
+  dplyr::select(Farm.ID, Species, Status, Size.ponds..Hectares., Size.land..Hectares., geometry) %>%
+  group_by(Farm.ID) %>%
+  summarise(
+    Species = max(Species, na.rm = TRUE),  
+    Status = max(Status, na.rm = TRUE),  
+    Size.ponds..Hectares. = max(Size.ponds..Hectares., na.rm = TRUE),  
+    Size.land..Hectares. = max(Size.land..Hectares., na.rm = TRUE),  
+    geometry = if (any(st_geometry_type(geometry) == "MULTIPOLYGON")) {
+      st_union(geometry[st_geometry_type(geometry) == "MULTIPOLYGON"])
+    } else {
+      st_union(geometry)  
+    }
+  )
+
+```
+#Save this data for further use
+```{r}
+st_write(NT_leases_farm, here("raw_data/NT_Aquaculture/NT_Leases_farm.gpkg"))
+```
+```{r}
+NT_leases_farm_polygons <- NT_leases_farm[st_geometry_type(NT_leases_farm) == "POLYGON", ]
+NT_leases_farm_Polygons_reproj<-st_transform(NT_leases_farm_polygons, 3577)
+```
+
+
+```{r}
+st_write(NT_leases_farm_Polygons_reproj, here("raw_data/NT_Aquaculture/NT_Leases_farm.shp"), delete_layer = TRUE)
+
+```
+```{r}
+NT_leases_farm_points <- NT_leases_farm[st_geometry_type(NT_leases_farm) == "POINT", ]
+NT_leases_farm_points_reproj<-st_transform(NT_leases_farm_points, 3577)
+```
+
+
+```{r}
+st_write(NT_leases_farm_points_reproj, here("raw_data/NT_Aquaculture/NT_Leases_farm_points.shp"), delete_layer = TRUE)
+
+```
+
+
+#load data australian map 
+```{r}
+Australia<-st_read(here("raw_data/Australia_country_SHP/AUS_2021_AUST_GDA2020.shp"))
+AUS_states<-st_read(here("raw_data/AustralianStates_SHP/STE_2021_AUST_GDA2020.shp"))
+```
+
+
+#reproject all data to Australian albers
+```{r}
+NT_leases_reproj<-st_transform(NT_leases_farm, 3577)
+Australia_reproj<-st_transform(Australia, 3577)
+AUS_states_reproj<-st_transform(AUS_states, 3577)
+
+
+```
+
+#make sure is valid the Australian states
+```{r}
+AUS_states_valid<-st_make_valid(AUS_states_reproj)
+```
+
+#isolate the NSW state 
+```{r}
+NT_map<-AUS_states_valid%>%
+  filter(STE_NAME21== "Northern Territory")
+```
+
+```{r}
+NT_map<-NT_map%>%
+  select(STE_NAME21, geometry)
+```
+
+```{r}
+st_write(NT_map, here("raw_data/NT_map.shp"))
+```
+#after GEE found the ponds upload results and then reduce them to the polygon size.
+```{r}
+NT_GEE_output<- st_read(here("output_data/NT_NDWI_aqua_ponds_sum_20_21/ndwi_sum_thresh_vector_NT_aqua_20_21.shp"))
+```
+```{r}
+NT_GEE_output_reproj<-st_transform(NT_GEE_output, 3577)
+```
+
+#dissolve the total ponds layer 
+```{r}
+NT_GEE_ponds_diss<-NT_GEE_output_reproj%>%
+  mutate(diss = 1) %>% #create column to dissolve by
+  group_by(diss) %>% #group by column you created
+  summarise(diss2 = sum(diss, na.rm = T)) #combine column into one new variable and ignore NA values
+  
+```
+#create the column with the area of the ponds
+```{r}
+NT_GEE_ponds_diss<-NT_GEE_ponds_diss%>%
+   mutate(water_area_m2 = as.numeric(st_area(.)))%>%
+  mutate(water_area_km2 = water_area_m2/1e6)
+```
+#sum the total pond are in NT 
+```{r}
+sum(NT_GEE_ponds_diss$water_area_km2)
+```
+
+#Check which of those ponds are in quaculture farms known
+```{r}
+NT_ponds_in_farms<-st_intersection(NT_leases_farm_Polygons_reproj, NT_GEE_ponds_diss)
+```
+#save ponds in NT farms
+```{r}
+st_write(NT_ponds_in_farms, here("output_data/NT_ponds_in_farms.gpkg"), delete_layer = TRUE)
+```
+
+#st_write(datayouwanttosave, here("output_data/foldername/datayouwanttosave.gpkg"), delete_layer = TRUE)
+
+
+```{r}
+tmap_mode('view')
+#tmap_mode("plot")
+tmap_options(check.and.fix = TRUE) 
+```
+
+# plot  aquaculture in Australia with satelite imagery
+```{r}
+tm_shape(AUS_states_valid)+
+  tm_borders(col='gray', alpha= 0.8) +
+  tm_shape(Australia_reproj)+
+  tm_borders(col='yellow', alpha= 0.9) +
+  tm_shape(NT_leases_reproj)+
+  tm_polygons(col="green",stroke=0.1, alpha=0.1)+
+  tm_shape(NT_ponds_in_farms)+
+  tm_polygons(col="blue",stroke= 0.1, alpha=0.9)+
+   tm_basemap(providers$Esri.WorldImagery)
+```
+
+
+# plot  aquaculture in Australia in map without imagery
+```{r}
+ tm_shape(AUS_states_valid)+
+  tm_borders(col='gray', alpha= 0.8) +
+  tm_shape(Australia_reproj)+
+  tm_borders(col='yellow', alpha= 0.9) +
+  tm_shape(NT_leases_reproj)+
+  tm_polygons(col="green",stroke=0.1, alpha=0.1)+
+  tm_shape(NT_ponds_in_farms)+
+  tm_polygons(col="blue",stroke= 0.1, alpha=0.9)
+
+  
+`

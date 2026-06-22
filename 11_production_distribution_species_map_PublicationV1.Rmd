@@ -1,0 +1,601 @@
+#Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+
+# ===== PRODUCTION DISTRIBUTION MAP =====
+# Faceted map of production per site for the five key species.
+# Source routing:
+#   Marine (Salmon, SBT, Oysters) → infrastructure_with_species
+#   Land   (Prawn, Barramundi)    → Australia_Land_Aquaculture_National.shp
+#
+# Production per site = (site_area / total_species_area) × national_actual_prod
+
+```{r production-distribution-map, fig.width=16, fig.height=20}
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(scales)
+library(here)
+
+# ── 0. Australia basemap (consistent with other SSRG maps) ───────────────────
+AUS_states <- st_read(here("raw_data/AustralianStates_SHP/STE_2021_AUST_GDA2020.shp"),
+                      quiet = TRUE) %>%
+  st_transform(4326) %>%   # reproject to match points layer
+  st_make_valid()
+
+
+# ── 1. Helper: distribute national production to sites by area ────────────────
+distribute_production <- function(infra_sf,
+                                   species_col,
+                                   species_match,
+                                   species_label,
+                                   actual_prod_t,
+                                   area_col = "infra_area_km2") {
+
+  sites <- infra_sf %>%
+    filter(str_detect(get(species_col), regex(species_match, ignore_case = TRUE)))
+
+  if (nrow(sites) == 0) {
+    warning(sprintf("No features matched '%s' for %s — check species_match string",
+                    species_match, species_label))
+    return(NULL)
+  }
+
+  # Empirical yield rate: national production / total detected infrastructure area
+  # Identical to script 11: actual_yield_per_km2 = actual_prod / area_km2
+  total_area        <- sum(st_drop_geometry(sites)[[area_col]], na.rm = TRUE)
+  empirical_yield   <- actual_prod_t / total_area   # t/km²
+
+  cat(sprintf("  %-20s empirical yield = %.1f t/km²  (%.2f t/ha)  across %.3f km² (%d sites)\n",
+              species_label, empirical_yield, empirical_yield / 100,
+              total_area, nrow(sites)))
+
+  sites <- sites %>%
+    mutate(
+      species_label = species_label,
+      site_area_km2 = .data[[area_col]],
+      site_prod_t   = site_area_km2 * empirical_yield
+    ) %>%
+    select(species_label, site_area_km2, site_prod_t) %>%
+    st_make_valid() %>%   # ← repair per-species subset before centroid
+    st_buffer(0)          # ← zero-buffer as backstop
+
+  suppressWarnings(st_centroid(sites))
+}
+
+# ── 2. Load and prepare the land-based shapefile ──────────────────────────────
+land_sf <- st_read(
+  here("output_data/Land_Aquaculture_Vectors/Australia_Land_Aquaculture_National.shp"),
+  quiet = TRUE
+) %>%
+  st_transform(4326)%>%
+st_make_valid()
+
+# Load marine infrastructure — runs independently of script 4
+ infrastructure_with_species <- st_read(
+  here("output_data/infrastructure_by_species/infrastructure_with_species.gpkg"),
+  quiet = TRUE
+)
+cat("✓ infrastructure_with_species loaded:", nrow(infrastructure_with_species), "features\n")
+
+marine_sf <- infrastructure_with_species %>%
+  st_transform(4326) %>%
+  st_make_valid() %>%
+  st_buffer(0)
+
+# Column names confirmed from your shapefile:
+#   Taxon    = species group/scientific name
+#   Spcs_cs  = common name
+#   In_A_KM  = infrastructure area in km²
+species_col_land <- "Taxon"    # switch to "Spcs_cs" if Taxon values don't match below
+area_col_land    <- "In_A_KM"
+
+# Diagnostic — shows you exactly what strings to use in species_match
+cat("Unique Taxon values in land shapefile:\n")
+print(sort(unique(land_sf$Taxon)))
+cat("\nUnique Spcs_cs values in land shapefile:\n")
+print(sort(unique(land_sf$Spcs_cs)))
+
+# ── 3. Prepare the marine infrastructure layer ────────────────────────────────
+marine_sf <- infrastructure_with_species %>%
+  st_transform(4326)
+
+# Confirm species column in marine layer
+species_col_marine <- names(marine_sf)[
+  str_detect(names(marine_sf), regex("species|taxon|common|name", ignore_case = TRUE))
+][1]
+
+cat("\nMarine layer — using species column:", species_col_marine, "\n")
+cat("Unique values:\n")
+print(sort(unique(marine_sf[[species_col_marine]])))
+
+# Ensure area column exists in marine layer
+if (!"infra_area_km2" %in% names(marine_sf)) {
+  marine_sf <- marine_sf %>%
+    mutate(infra_area_km2 = as.numeric(st_area(geometry)) / 1e6)
+  cat("Note: computed infra_area_km2 from marine geometry\n")
+}
+
+# ── 4. Distribute production per site for each species ────────────────────────
+# After running section 2-3, check the printed unique values above and update
+# species_match strings here if needed.
+# ── 4a. Production totals — pulled from species_params (must be loaded from script 11)
+# ── 4a. ABARES 2021-22 production totals (hardcoded)
+actual_production        <- 79271
+sbt_actual_production    <- 8322
+prawn_actual_production  <- 9450
+barra_actual_production  <- 4742
+oyster_actual_production <- 11735
+
+# ── 4b. Use Spcs_cs for land (Taxon is too broad — only Fish/Crustacean etc.)
+species_col_land <- "Spcs_cs"
+
+# ── 4. Distribute production per site ─────────────────────────────────────────
+
+# MARINE
+sites_salmon <- distribute_production(
+  infra_sf      = marine_sf,
+  species_col   = species_col_marine,
+  species_match = "Atlantic Salmon|atl_salmon",
+  species_label = "Atlantic Salmon",
+  actual_prod_t = actual_production
+)
+
+sites_sbt <- distribute_production(
+  infra_sf      = marine_sf,
+  species_col   = species_col_marine,
+  species_match = "Southern Bluefin|bluefin|sbt",
+  species_label = "S. Bluefin Tuna",
+  actual_prod_t = sbt_actual_production
+)
+
+sites_oyster <- distribute_production(
+  infra_sf      = marine_sf %>%
+    filter(!str_detect(get(species_col_marine),
+                       regex("pearl", ignore_case = TRUE))),
+  species_col   = species_col_marine,
+  species_match = "oyster",          # catches "Edible Oyster (aggregated)", excludes Pearl
+  species_label = "Oysters",
+  actual_prod_t = oyster_actual_production
+)
+
+# LAND — Spcs_cs values confirmed:
+#   Prawn:      "Prawn", "Multiple (Barramundi, Prawn)", "Multiple (Red Claw Crayfish, Prawn)"
+#   Barramundi: "Barramundi", "Multiple (Barramundi, Prawn)", "Multiple (Barramundi, Red Claw Crayfish)"
+sites_prawn <- distribute_production(
+  infra_sf      = land_sf,
+  species_col   = species_col_land,
+  species_match = "prawn",           # catches Prawn + all Multi entries containing Prawn
+  species_label = "Black Tiger Prawn",
+  actual_prod_t = prawn_actual_production,
+  area_col      = area_col_land
+)
+
+sites_barra <- distribute_production(
+  infra_sf      = land_sf,
+  species_col   = species_col_land,
+  species_match = "barramundi",      # catches Barramundi + all Multi entries containing Barramundi
+  species_label = "Barramundi",
+  actual_prod_t = barra_actual_production,
+  area_col      = area_col_land
+)
+
+# ── 5. Combine all species ────────────────────────────────────────────────────
+
+# Normalise geometry column name before rbind (marine and land layers may differ)
+normalise_geom <- function(x) {
+  if (is.null(x)) return(NULL)
+  st_geometry(x) <- "geometry"   # force consistent name
+  x
+}
+
+all_sites <- do.call(rbind, Filter(Negate(is.null), lapply(
+  list(sites_salmon, sites_sbt, sites_oyster, sites_prawn, sites_barra),
+  normalise_geom
+)))
+
+all_sites$species_label <- factor(
+  all_sites$species_label,
+  levels = c("Atlantic Salmon", "S. Bluefin Tuna",
+             "Black Tiger Prawn", "Barramundi", "Oysters")
+)
+
+# Extract coordinates for ggplot
+all_sites_coords <- all_sites %>%
+  mutate(
+    lon = st_coordinates(geometry)[, 1],
+    lat = st_coordinates(geometry)[, 2]
+  ) %>%
+  st_drop_geometry()
+
+# Sanity check — totals should equal ABARES figures
+cat("\nProduction summary by species (should match ABARES totals):\n")
+all_sites_coords %>%
+  group_by(species_label) %>%
+  summarise(n_sites = n(), total_prod_t = round(sum(site_prod_t)), .groups = "drop") %>%
+  print()
+```
+
+#acronyms for states for mapping
+```{r}
+state_labels <- AUS_states %>%
+  st_make_valid() %>%
+  filter(!STE_NAME21 %in% c("Other Territories", "Outside Australia",
+                             "Australian Capital Territory")) %>%
+  st_centroid() %>%
+  mutate(
+    lon = st_coordinates(geometry)[, 1],
+    lat = st_coordinates(geometry)[, 2],
+    acronym = case_when(
+      STE_NAME21 == "New South Wales"    ~ "NSW",
+      STE_NAME21 == "Victoria"           ~ "VIC",
+      STE_NAME21 == "Queensland"         ~ "QLD",
+      STE_NAME21 == "South Australia"    ~ "SA",
+      STE_NAME21 == "Western Australia"  ~ "WA",
+      STE_NAME21 == "Tasmania"           ~ "TAS",
+      STE_NAME21 == "Northern Territory" ~ "NT",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(acronym)) %>%
+  st_drop_geometry()
+```
+
+#mapping aquaculture production
+# production totals = ABARES 2021.  Circle area  site production (tonnes).\n",      "Method: site_prod = site_area  empirical yield rate (t/km)
+
+```{r production-distribution-map, fig.width=16, fig.height=20}
+# ── 6. Species colour palette ─────────────────────────────────────────────────
+species_colours <- c(
+  "Atlantic Salmon"   = "#D55E00",  # vermillion 
+  "S. Bluefin Tuna"   = "#0072B2",    # blue 
+  "Black Tiger Prawn" = "#CC79A7",  #golden "#E69F00"
+  "Barramundi"        = "#009E73",   # bluish green
+  "Oysters"           = "#5C0099"    #  purple
+)
+
+# ── 7. Faceted production bubble map ─────────────────────────────────────────
+
+prod_map <- ggplot() +
+  geom_sf(data = AUS_states, fill = "grey90", colour = "grey60", linewidth = 0.3) +
+  geom_text(
+  data = state_labels,
+  aes(x = lon, y = lat, label = acronym),
+  size     = 3,
+  colour   = "grey50",
+  fontface = "bold"
+) +
+  geom_point(
+    data  = all_sites_coords,
+    aes(x = lon, y = lat, size = site_prod_t, colour = species_label),
+    alpha = 0.72, shape = 16
+  ) +
+  scale_size_area(
+    name     = "Estimated production\nat site (tonnes)",
+    max_size = 10,
+    breaks   = c(10, 100, 500, 2000, 5000, 20000),
+    labels   = scales::comma
+  ) +
+  scale_colour_manual(values = species_colours, guide = "none") +
+  facet_wrap(~ species_label, ncol = 2) +
+  coord_sf(xlim = c(113, 155), ylim = c(-44, -10), expand = FALSE) +
+  labs(x = NULL, y = NULL) +
+   
+  theme_void(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 15, hjust = 0),
+    plot.subtitle    = element_text(size = 9.5, colour = "grey35", hjust = 0,
+                                    margin = margin(b = 6)),
+    plot.caption     = element_text(size = 8, colour = "grey50", hjust = 0),
+    strip.text       = element_text(face = "bold", size = 11, colour = "white"),
+    strip.background = element_rect(fill = "grey25", colour = NA),
+    legend.position  = "bottom",
+    legend.title     = element_text(size = 9, face = "bold"),
+    legend.text      = element_text(size = 8),
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    plot.background  = element_rect(fill = "transparent", colour = NA),
+    plot.margin      = margin(10, 10, 10, 10)
+  ) +
+  guides(
+    size = guide_legend(
+      title.position = "top",
+      override.aes   = list(colour = "grey30", alpha = 0.8)
+    )
+  )
+
+print(prod_map)
+
+ggsave(
+  here("figures/Production_Distribution_Map_Faceted.png"),
+  plot = prod_map, width = 16, height = 20, dpi = 300,
+  bg = "transparent"
+)
+
+
+cat("\n✓ Faceted production map saved to figures/Production_Distribution_Map_Faceted.png\n")
+```
+
+
+# ===== OPTIONAL: COMBINED SINGLE-PANEL MAP =====
+
+```{r production-map-combined, fig.width=14, fig.height=9}
+
+combined_map <- ggplot() +
+  geom_sf(data = AUS_states, fill = "grey90", colour = "grey60", linewidth = 0.3) +
+  geom_text(
+  data = state_labels,
+  aes(x = lon, y = lat, label = acronym),
+  size     = 3,
+  colour   = "grey50",
+  fontface = "bold"
+) +
+  geom_point(
+    data  = all_sites_coords,
+    aes(x = lon, y = lat, size = site_prod_t,
+        colour = species_label, fill = species_label),
+    alpha = 0.72, shape = 21, stroke = 0.4
+  ) +
+  scale_size_area(
+    name     = "Estimated\nproduction (t)",
+    max_size = 10,
+    breaks   = c(10, 100, 500, 2000, 10000, 30000),
+    labels   = scales::comma
+  ) +
+  scale_colour_manual(name = "Species", values = species_colours) +
+  scale_fill_manual(  name = "Species", values = scales::alpha(species_colours, 0.7)) +
+  coord_sf(xlim = c(113, 155), ylim = c(-44, -10), expand = FALSE) +
+  labs(x = NULL, y = NULL) +
+  
+  theme_void(base_size = 12) +
+  theme(
+    plot.title       = element_text(face = "bold", size = 14, hjust = 0),
+    plot.subtitle    = element_text(size = 10, colour = "grey40", hjust = 0),
+    plot.caption     = element_text(size = 8, colour = "grey50", hjust = 0),
+    legend.position  = "right",
+    legend.title     = element_text(size = 9, face = "bold"),
+    legend.text      = element_text(size = 8),
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    plot.background  = element_rect(fill = "transparent", colour = NA),
+    plot.margin      = margin(10, 10, 10, 10)
+  ) +
+  guides(
+    colour = guide_legend(override.aes = list(size = 5, alpha = 0.9), order = 1),
+    fill   = guide_legend(override.aes = list(size = 5, alpha = 0.9), order = 1),
+    size   = guide_legend(
+      title.position = "top",
+      override.aes   = list(colour = "grey30", fill = "grey60"),
+      order = 2
+    )
+  )
+
+print(combined_map)
+
+ggsave(
+  here("figures/Production_Distribution_Map_Combinedv2.png"),
+  plot = combined_map, width = 14, height = 9, dpi = 300, bg = "white"
+)
+cat("✓ Combined production map saved\n")
+```
+#colorblind safe map of all species for supplementary materials with no production distribution quantities, just locations hotspots
+
+```{r}
+# ===== SUPPLEMENTARY FIGURE: All-Species Aquaculture Site Distribution =====
+
+# ── 0. Packages ───────────────────────────────────────────────────────────────
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(here)
+
+# ── 1. Standardise marine species labels ──────────────────────────────────────
+marine_supp <- infrastructure_with_species %>%
+  st_transform(4326) %>%
+  st_make_valid() %>%
+  st_buffer(0) %>%
+  rename(raw_species = all_of(species_col_marine)) %>%
+  mutate(
+    species_label = case_when(
+      str_detect(raw_species, regex("atlantic salmon|atl.salmon",      ignore_case = TRUE)) ~ "Atlantic Salmon",
+      str_detect(raw_species, regex("southern bluefin|bluefin|\\bsbt\\b", ignore_case = TRUE)) ~ "S. Bluefin Tuna",
+      str_detect(raw_species, regex("pearl oyster",                    ignore_case = TRUE)) ~ "Pearl Oyster",
+      str_detect(raw_species, regex("oyster",                          ignore_case = TRUE)) ~ "Edible Oyster",
+      str_detect(raw_species, regex("mussel",                          ignore_case = TRUE)) ~ "Mussel",
+      str_detect(raw_species, regex("abalone",                         ignore_case = TRUE)) ~ "Abalone",
+      str_detect(raw_species, regex("prawn|shrimp",                    ignore_case = TRUE)) ~ "Prawn",
+      str_detect(raw_species, regex("barramundi",                      ignore_case = TRUE)) ~ "Barramundi",
+      TRUE ~ str_to_title(str_trim(raw_species))
+    ),
+    source = "Marine"
+  ) %>%
+  select(species_label, source)
+
+# ── 2. Standardise land species labels ────────────────────────────────────────
+expand_land_species <- function(sf_obj, species_col = "Spcs_cs") {
+  sf_obj %>%
+    mutate(row_id = row_number(),
+           is_multi = str_detect(.data[[species_col]], regex("multiple", ignore_case = TRUE)),
+           tokens   = if_else(is_multi,
+                              str_extract_all(.data[[species_col]], "(?<=\\().*(?=\\))"),
+                              list(NULL))) %>%
+    {
+      single <- filter(., !is_multi) %>%
+        mutate(Spcs_clean = .data[[species_col]]) %>%
+        select(row_id, Spcs_clean)
+      multi <- filter(., is_multi) %>%
+        tidyr::unnest(tokens) %>%
+        tidyr::separate_rows(tokens, sep = ",\\s*") %>%
+        mutate(Spcs_clean = str_trim(tokens)) %>%
+        select(row_id, Spcs_clean)
+      bind_rows(single, multi)
+    } %>%
+    left_join(st_drop_geometry(sf_obj) %>% mutate(row_id = row_number()), by = "row_id") %>%
+    st_as_sf(crs = st_crs(sf_obj))
+}
+
+land_supp <- land_sf %>%
+  st_transform(4326) %>%
+  expand_land_species(species_col = "Spcs_cs") %>%
+  mutate(
+    species_label = case_when(
+      str_detect(Spcs_clean, regex("atlantic salmon",                        ignore_case = TRUE)) ~ "Atlantic Salmon",
+     str_detect(Spcs_clean, regex("atlantic salmon|\\bsalmon\\b|atl[._]salmon|salmonid", 
+                              ignore_case = TRUE)) ~ "Atlantic Salmon",
+      str_detect(Spcs_clean, regex("barramundi",                             ignore_case = TRUE)) ~ "Barramundi",
+      str_detect(Spcs_clean, regex("prawn",                                  ignore_case = TRUE)) ~ "Prawn",
+      str_detect(Spcs_clean, regex("abalone",                                ignore_case = TRUE)) ~ "Abalone",
+      str_detect(Spcs_clean, regex("mussel",                                 ignore_case = TRUE)) ~ "Mussel",
+      str_detect(Spcs_clean, regex("cherax|red claw|crayfish|yabby|marron",  ignore_case = TRUE)) ~ "Cherax / Red Claw",
+      str_detect(Spcs_clean, regex("trout",                                  ignore_case = TRUE)) ~ "Trout",
+      str_detect(Spcs_clean, regex("tuna",                                   ignore_case = TRUE)) ~ "S. Bluefin Tuna",
+      str_detect(Spcs_clean, regex("murray cod|silver perch|jade perch",     ignore_case = TRUE)) ~ "Native Freshwater Fish",
+      str_detect(Spcs_clean, regex("native finfish|mangrove jack|sea mullet|cobia|grouper", ignore_case = TRUE)) ~ "Native Finfish",
+      TRUE ~ str_to_title(str_trim(Spcs_clean))
+    ),
+    source = "Land"
+  ) %>%
+  select(species_label, source)
+
+# ── 3. Merge, centroid, filter ────────────────────────────────────────────────
+normalise_geom <- function(x) { st_geometry(x) <- "geometry"; x }
+
+all_supp_centroids <- bind_rows(
+  normalise_geom(marine_supp),
+  normalise_geom(land_supp)
+) %>%
+  st_make_valid() %>%
+  st_buffer(0) %>%
+  st_cast("MULTIPOLYGON") %>%
+  st_cast("POLYGON")
+
+# Centroid outside the pipe to avoid the recursive evaluation error
+all_supp_centroids <- suppressWarnings(st_centroid(all_supp_centroids)) %>%
+  mutate(
+    lon = st_coordinates(geometry)[, 1],
+    lat = st_coordinates(geometry)[, 2]
+  ) %>%
+  st_drop_geometry() %>%
+  filter(!is.na(lon), !is.na(lat))
+
+# Exclude non-species categories
+exclude_labels <- c("Hatchery", "Aquarium", "Tourism", "Subtidal",
+                    "Production Lease", "Miscellaneous", "Finfish",
+                    "Lobster", "Pearl Oyster", "Snapper", "Aquarium")
+
+all_supp_centroids <- all_supp_centroids %>%
+  filter(!species_label %in% exclude_labels,
+         !is.na(species_label))
+
+cat("Species present:\n")
+all_supp_centroids %>% count(species_label, sort = TRUE) %>% print(n = 30)
+
+# ── 4. Hardcoded palette ──────────────────────────────────────────────────────
+# Anchor species = exact production map colours
+# Secondary species = tonal relatives within same hue family
+
+species_pal <- c(
+  # Vermillion — Salmon anchor
+  "Atlantic Salmon"        = "#D55E00",
+
+  # Blue — Tuna anchor
+  "S. Bluefin Tuna"        = "#0072B2",
+
+  # Purple — Oyster anchor, Mussel lighter
+  "Edible Oyster"          = "#5C0099",
+  "Mussel"                 = "#9B4DD4",
+
+  # Golden — Prawn anchor, Cherax darker amber
+  "Prawn"                  = "#E69F00",
+  "Cherax / Red Claw"      = "#CC6677",
+
+  # Teal — Barramundi anchor, other land finfish lighter
+  "Barramundi"             = "#009E73",
+  "Native Finfish"         = "#4DC4A3",
+  "Native Freshwater Fish" = "#A8E6D5",
+  "Trout"                  = "#005240",
+
+  # Magenta — Abalone
+  "Abalone"                = "#AE017E"
+)
+
+# ── 5. Build all_supp_facet ───────────────────────────────────────────────────
+all_supp_facet <- all_supp_centroids %>%
+  filter(species_label %in% names(species_pal)) %>%
+  mutate(species_label = factor(species_label, levels = names(species_pal)))
+
+n_species_facet <- nlevels(droplevels(all_supp_facet$species_label))
+n_cols <- 3
+n_rows <- ceiling(n_species_facet / n_cols)
+fig_h  <- max(14, n_rows * 5)
+
+cat("Species in faceted map:", n_species_facet, "\n")
+print(levels(droplevels(all_supp_facet$species_label)))
+
+# ── 6. Faceted presence map ───────────────────────────────────────────────────
+supp_map <- ggplot() +
+  geom_sf(data = AUS_states, fill = "grey93", colour = "grey60", linewidth = 0.25) +
+  geom_text(data = state_labels, aes(x = lon, y = lat, label = acronym),
+            size = 1.5, colour = "grey55", fontface = "bold") +
+  geom_point(data = all_supp_facet, aes(x = lon, y = lat, colour = species_label),
+             size = 1.0, alpha = 0.75, shape = 16) +
+  scale_colour_manual(values = species_pal, guide = "none") +
+  facet_wrap(~ species_label, ncol = n_cols) +
+  coord_sf(xlim = c(113, 155), ylim = c(-44, -10), expand = FALSE) +
+  labs(x = NULL, y = NULL) +
+  theme_void(base_size = 11) +
+  theme(
+    strip.text       = element_text(face = "bold", size = 9.5, colour = "white"),
+    strip.background = element_rect(fill = "grey25", colour = NA),
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    plot.background  = element_rect(fill = "white", colour = NA),
+    plot.margin      = margin(10, 12, 10, 12)
+  )
+
+print(supp_map)
+
+ggsave(
+  here("figures/Supplementary_AllSpecies_Distribution_Map.png"),
+  plot = supp_map, width = 14, height = fig_h, dpi = 300, bg = "white"
+)
+cat(sprintf("\n✓ Faceted supplementary map saved — %d species, %d × %d grid\n",
+            n_species_facet, n_rows, n_cols))
+
+# ── 7. Combined single-panel map ──────────────────────────────────────────────
+# Subset palette to only species actually present in all_supp_facet
+facet_pal <- species_pal[levels(droplevels(all_supp_facet$species_label))]
+
+cat("Colours assigned:\n")
+print(facet_pal)
+
+supp_combined <- ggplot() +
+  geom_sf(data = AUS_states, fill = "grey93", colour = "grey60", linewidth = 0.15) +
+  geom_text(data = state_labels, aes(x = lon, y = lat, label = acronym),
+            size = 3, colour = "grey55", fontface = "bold") +
+  geom_point(data = all_supp_facet, aes(x = lon, y = lat, colour = species_label),
+             size = 1.0, alpha = 0.80, shape = 16) +
+  scale_colour_manual(name = "Species", values = facet_pal) +
+  coord_sf(xlim = c(113, 155), ylim = c(-44, -10), expand = FALSE) +
+  labs(x = NULL, y = NULL) +
+  theme_void(base_size = 11) +
+  theme(
+    legend.position = "right",
+    legend.title    = element_text(size = 9, face = "bold"),
+    legend.text     = element_text(size = 7.5),
+    plot.background = element_rect(fill = "transparent", colour = NA),
+    plot.margin     = margin(10, 10, 10, 10)
+  ) +
+  guides(colour = guide_legend(ncol = 1,
+                               override.aes = list(size = 4, alpha = 0.9, shape = 16)))
+
+print(supp_combined)
+
+ggsave(
+  here("figures/Supplementary_AllSpecies_Distribution_Map_Combinedv2.png"),
+  plot = supp_combined, width = 14, height = 9, dpi = 300, bg = "transparent"
+)
+cat("✓ Combined supplementary map saved\n")
+```
+

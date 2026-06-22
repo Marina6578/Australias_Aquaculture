@@ -1,0 +1,1141 @@
+---
+title: "0_abares_species_states"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+#Most figures done here are part of Marina Christofidis' PhD Thesis and helped to give shape to the Manuscript named Mapping Australia’s aquaculture footprint. 
+date: "2025-10-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+```{r}
+#install.packages("docxtractr")
+```
+
+#upload libraries
+```{r}
+library(tmaptools)
+library(gridExtra)
+library(cowplot)
+library(tidyverse)
+library(here)
+library(tmap)
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(docxtractr)
+library(tidyr)
+```
+#upload the australian map, reproject and make valid and with states as well data from Australia and states was downloaded from the Australian Bureau of Statistics  https://www.abs.gov.au/statistics/standards/australian-statistical-geography-standard-asgs-edition-3/jul2021-jun2026/access-and-downloads/digital-boundary-files
+```{r}
+#upload, make valid and reproject data
+Australia<-st_read(here("raw_data/Australia_country_SHP/AUS_2021_AUST_GDA2020.shp"))%>%
+  st_transform(, 3577)%>%
+  st_make_valid()
+
+AUS_states<-st_read(here("raw_data/AustralianStates_SHP/STE_2021_AUST_GDA2020.shp"))%>%
+  st_transform(, 3577)%>%
+  st_make_valid()
+
+```
+#upload abares table that we did using the species data we colledcted and from the ABARES table
+
+```{r}
+
+# Read your file
+Abares_doc <- read_docx(here("raw_data/Aquaculture_Production_ABARES_DAFF/table_states_species_aquaculture_Australia.docx"))
+
+# Extract the first table
+Abares_data <- docx_extract_tbl(Abares_doc, tbl_number = 1)
+
+# Check it out
+head(Abares_data)
+
+```
+
+
+#ensure that if a species is present at any given state it will be in AUS figured as also Y present
+```{r}
+Abares_data_clean <- Abares_data %>%
+  # Ensure AUS = "Y" if any state has "Y"
+  rowwise() %>%
+  mutate(AUS = ifelse(any(c_across(c(NT, QLD, NSW, VIC, TAS, SA, WA)) == "Y"), "Y", AUS)) %>%
+  ungroup()
+```
+
+# pivot to long format for mapping
+
+```{r}
+Abares_data_long <- Abares_data_clean %>%
+  pivot_longer(
+    cols = c(NT, QLD, NSW, VIC, TAS, SA, WA),
+    names_to = "State",
+    values_to = "Presence"
+  ) %>%
+  filter(Presence == "Y")
+
+```
+
+#make map
+
+```{r}
+
+# Add matching abbreviations
+AUS_states <- AUS_states %>%
+  mutate(State = case_when(
+    STE_NAME21 == "Queensland" ~ "QLD",
+    STE_NAME21 == "New South Wales" ~ "NSW",
+    STE_NAME21 == "Victoria" ~ "VIC",
+    STE_NAME21 == "Tasmania" ~ "TAS",
+    STE_NAME21 == "South Australia" ~ "SA",
+    STE_NAME21 == "Western Australia" ~ "WA",
+    STE_NAME21 == "Northern Territory" ~ "NT",
+    TRUE ~ NA_character_
+  ))
+
+
+```
+#merge datasets
+```{r}
+Abares_map <- AUS_states %>%
+  left_join(Abares_data_long, by = "State")
+
+```
+
+#map
+```{r}
+
+group_aquaculture<- ggplot(Abares_map) +
+  geom_sf(aes(fill = group)) +
+  facet_wrap(~ group) +
+  theme_minimal() +
+  labs(title = "Aquaculture Species Distribution by State in Australia",
+       fill = "Species group")
+plot(group_aquaculture)
+
+ggsave(
+  filename = here("Figures", "Aquaculture_groups_map.png"),
+  plot = group_aquaculture,
+  width = 10,       # adjust size to your liking
+  height = 6,
+  dpi = 300         # good for publication quality
+)
+
+```
+
+#Presence of species in australia anywhere
+```{r}
+AUS_presence <- Abares_data_clean %>%
+  filter(AUS == "Y") %>%
+  dplyr:::select(Species, group, aquaculturerealm)
+
+```
+#calculate the number of species per state
+```{r}
+# Count how many species occur in each state
+state_species_counts <- Abares_data_long %>%
+  group_by(State) %>%
+  summarise(species_count = n_distinct(Species)) %>%
+  arrange(desc(species_count))
+
+```
+
+#join spatial data for counts
+```{r}
+AUS_states_richness <- AUS_states %>%
+  left_join(state_species_counts, by = "State")
+
+```
+
+#make richness map
+```{r}
+library(ggplot2)
+
+richness_map<- ggplot(AUS_states_richness) +
+  geom_sf(aes(fill = species_count)) +
+  scale_fill_viridis_c(option = "C", na.value = "grey90") +
+  theme_minimal() +
+  labs(
+    title = "Aquaculture Species Richness by State",
+    fill = "No. of Species"
+  )
+plot(richness_map)
+```
+
+#save richness map
+```{r}
+ggsave(
+  filename = here("figures", "Richness_map.png"),
+  plot = richness_map,
+  width = 10,       # adjust size to your liking
+  height = 6,
+  dpi = 300         # good for publication quality
+)
+
+```
+
+#read production
+#The ABARES production table was downloaded from : https://view.officeapps.live.com/op/view.aspx?src=https%3A%2F%2Fdaff.ent.sirsidynix.net.au%2Fclient%2Fen_AU%2Fsearch%2Fasset%2F1037341%2F2&wdOrigin=BROWSELINK
+```{r}
+# Read the production data
+library(readxl)
+
+production_data_AU <- read_excel(
+  here("raw_data/Aquaculture_Production_ABARES_DAFF/02_DataTables_AustFishAquacStats_2024_v1.0.0.xlsx"),
+  sheet = "Table 4"  # select the sheets in the excell file
+)
+
+production_data_NSW <- read_excel(
+  here("raw_data/Aquaculture_Production_ABARES_DAFF/02_DataTables_AustFishAquacStats_2024_v1.0.0.xlsx"),
+  sheet = "Table 5"  # select the sheets in the excell file
+)
+
+production_data_VIC<- read_excel(
+  here("raw_data/Aquaculture_Production_ABARES_DAFF/02_DataTables_AustFishAquacStats_2024_v1.0.0.xlsx"),
+  sheet = "Table 6"  # select the sheets in the excell file
+)
+
+production_data_QLD <- read_excel(
+  here("raw_data/Aquaculture_Production_ABARES_DAFF/02_DataTables_AustFishAquacStats_2024_v1.0.0.xlsx"),
+  sheet = "Table 7"  # select the sheets in the excell file
+)
+production_data_SA <- read_excel(
+  here("raw_data/Aquaculture_Production_ABARES_DAFF/02_DataTables_AustFishAquacStats_2024_v1.0.0.xlsx"),
+  sheet = "Table 8"  # select the sheets in the excell file
+)
+production_data_WA <- read_excel(
+  here("raw_data/Aquaculture_Production_ABARES_DAFF/02_DataTables_AustFishAquacStats_2024_v1.0.0.xlsx"),
+  sheet = "Table 9"  # select the sheets in the excell file
+)
+production_data_TAS <- read_excel(
+  here("raw_data/Aquaculture_Production_ABARES_DAFF/02_DataTables_AustFishAquacStats_2024_v1.0.0.xlsx"),
+  sheet = "Table 10"  # select the sheets in the excell file
+)
+production_data_NT <- read_excel(
+  here("raw_data/Aquaculture_Production_ABARES_DAFF/02_DataTables_AustFishAquacStats_2024_v1.0.0.xlsx"),
+  sheet = "Table 11"  # select the sheets in the excell file
+)
+```
+
+#filter only aquaculture (there is fishery data as well in each layer)
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+# Improved function that finds "Aquaculture" regardless of the letter
+extract_aquaculture_data <- function(file_path, sheet_name, state_abbr) {
+  
+  # Read raw data without headers
+  raw_data <- read_excel(file_path, sheet = sheet_name, col_names = FALSE)
+  
+  # Find ALL rows that start with "Aquaculture" (followed by any letter or space)
+  # This regex matches "Aquaculture", "Aquaculture a", "Aquaculture h", etc.
+  aqua_rows <- which(str_detect(raw_data[[1]], "^Aquaculture\\s*[a-z]?\\s*$"))
+  
+  if(length(aqua_rows) < 2) {
+    warning(paste("Expected 2 Aquaculture sections in", sheet_name, 
+                  "but found", length(aqua_rows)))
+    # Print what was found for debugging
+    print(paste("Found in", sheet_name, ":"))
+    print(raw_data[[1]][str_detect(raw_data[[1]], "Aquaculture")])
+    return(NULL)
+  }
+  
+  # First aquaculture section = VALUE data ($'000)
+  value_start <- aqua_rows[1] + 1
+  value_end <- aqua_rows[2] - 1
+  
+  # Second aquaculture section = QUANTITY (tonnes) data
+  tonnes_start <- aqua_rows[2] + 1
+  
+  # Find where tonnes section ends (look for "Total" or end of data)
+  total_rows_after_tonnes <- which(str_detect(
+    raw_data[[1]][(tonnes_start):nrow(raw_data)], 
+    "^Total"
+  ))
+  
+  if(length(total_rows_after_tonnes) > 0) {
+    tonnes_end <- tonnes_start + total_rows_after_tonnes[1] - 2
+  } else {
+    tonnes_end <- nrow(raw_data)
+  }
+  
+  # Find the header row with years (usually row 2 or 3)
+  # Look for cells containing year patterns like "1998-99", "2023-24", etc.
+  year_pattern <- "[0-9]{4}[-–][0-9]{2}"
+  header_candidates <- which(apply(raw_data, 1, function(row) {
+    any(str_detect(as.character(row), year_pattern))
+  }))
+  
+  if(length(header_candidates) > 0) {
+    header_row <- header_candidates[1]
+  } else {
+    # Fallback to row 2
+    header_row <- 2
+  }
+  
+  # Extract year headers
+  year_headers <- as.character(raw_data[header_row, ])
+  year_headers[1] <- "Species"  # First column is commodity/species names
+  year_headers[2] <- "Unit"      # Second column is unit (often present)
+  
+  # Clean up year headers (remove NA, clean whitespace)
+  year_headers <- ifelse(is.na(year_headers) | year_headers == "NA", 
+                         paste0("Col_", seq_along(year_headers)), 
+                         year_headers)
+  
+  # --- Extract VALUE section ---
+  value_section <- raw_data[value_start:value_end, ]
+  colnames(value_section) <- year_headers
+  
+  value_clean <- value_section %>%
+    filter(!is.na(Species), 
+           Species != "", 
+           !str_detect(Species, "^Total"),
+           !str_detect(Species, "^Aquaculture")) %>%
+    select(-any_of("Unit")) %>%  # Remove unit column if present
+    mutate(Species = str_trim(Species)) %>%
+    pivot_longer(
+      cols = -Species,
+      names_to = "Financial_Year",
+      values_to = "Value_AUD_thousands"
+    ) %>%
+    filter(!str_detect(Financial_Year, "^Col_")) %>%  # Remove placeholder columns
+    mutate(
+      State = state_abbr,
+      Value_AUD_thousands = as.numeric(Value_AUD_thousands)
+    ) %>%
+    filter(!is.na(Value_AUD_thousands))
+  
+  # --- Extract QUANTITY (tonnes) section ---
+  tonnes_section <- raw_data[tonnes_start:tonnes_end, ]
+  colnames(tonnes_section) <- year_headers
+  
+  tonnes_clean <- tonnes_section %>%
+    filter(!is.na(Species), 
+           Species != "", 
+           !str_detect(Species, "^Total"),
+           !str_detect(Species, "^Aquaculture")) %>%
+    select(-any_of("Unit")) %>%
+    mutate(Species = str_trim(Species)) %>%
+    pivot_longer(
+      cols = -Species,
+      names_to = "Financial_Year",
+      values_to = "Tonnes"
+    ) %>%
+    filter(!str_detect(Financial_Year, "^Col_")) %>%
+    mutate(
+      State = state_abbr,
+      Tonnes = as.numeric(Tonnes)
+    ) %>%
+    filter(!is.na(Tonnes))
+  
+  # --- Combine value and tonnes data ---
+  combined_data <- value_clean %>%
+    full_join(tonnes_clean, by = c("State", "Species", "Financial_Year"))
+  
+  return(combined_data)
+}
+
+# Test on a couple of states first to verify it works
+file_path <- here("raw_data/Aquaculture_Production_ABARES_DAFF/02_DataTables_AustFishAquacStats_2024_v1.0.0.xlsx")
+
+# Test NSW (has "Aquaculture h")
+test_nsw <- extract_aquaculture_data(file_path, "Table 5", "NSW")
+View(test_nsw)
+
+# Test QLD (has "Aquaculture c")
+test_qld <- extract_aquaculture_data(file_path, "Table 7", "QLD")
+View(test_qld)
+
+# If those look good, process all states
+production_data_AUS <- extract_aquaculture_data(file_path, "Table 4", "AUS")
+production_data_NSW <- extract_aquaculture_data(file_path, "Table 5", "NSW")
+production_data_VIC <- extract_aquaculture_data(file_path, "Table 6", "VIC")
+production_data_QLD <- extract_aquaculture_data(file_path, "Table 7", "QLD")
+production_data_SA <- extract_aquaculture_data(file_path, "Table 8", "SA")
+production_data_WA <- extract_aquaculture_data(file_path, "Table 9", "WA")
+production_data_TAS <- extract_aquaculture_data(file_path, "Table 10", "TAS")
+production_data_NT <- extract_aquaculture_data(file_path, "Table 11", "NT")
+
+# Combine all states
+production_data_all <- bind_rows(
+  production_data_AUS,
+  production_data_NSW,
+  production_data_VIC,
+  production_data_QLD,
+  production_data_SA,
+  production_data_WA,
+  production_data_TAS,
+  production_data_NT
+)
+
+View(production_data_all)
+
+# Quick summary
+summary_stats <- production_data_all %>%
+  group_by(State) %>%
+  summarise(
+    n_species = n_distinct(Species),
+    n_years = n_distinct(Financial_Year),
+    total_records = n()
+  )
+
+print(summary_stats)
+
+# Check unique species names
+unique_species <- production_data_all %>%
+  distinct(Species) %>%
+  arrange(Species)
+
+View(unique_species)
+```
+#function 3
+```{r}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+# Corrected function - extract BETWEEN "Total wild-caught" and "Total" rows
+extract_aquaculture_data_v3 <- function(file_path, sheet_name, state_abbr) {
+  
+  # Read raw data without headers
+  raw_data <- read_excel(file_path, sheet = sheet_name, col_names = FALSE)
+  
+  # Find "Total wild-caught" rows (should be 2: one in Value, one in Quantity)
+  wild_caught_rows <- which(str_detect(raw_data[[1]], "^Total wild-caught"))
+  
+  # Find "Total production" or just "Total" rows that come AFTER aquaculture data
+  # We need to find rows that say exactly "Total" and are after "Total wild-caught"
+  total_rows <- which(str_detect(raw_data[[1]], "^Total$"))
+  
+  if(length(wild_caught_rows) < 2) {
+    warning(paste("Expected 2 'Total wild-caught' markers in", sheet_name, 
+                  "but found", length(wild_caught_rows)))
+    return(NULL)
+  }
+  
+  # VALUE section: rows between first "Total wild-caught" and first "Total" after it
+  value_start <- wild_caught_rows[1] + 1
+  
+  # Find the first "Total" row that comes after the aquaculture section starts
+  # It should be labeled as "Aquaculture" followed by species, then "Total"
+  value_end_candidates <- total_rows[total_rows > value_start & total_rows < wild_caught_rows[2]]
+  if(length(value_end_candidates) > 0) {
+    value_end <- value_end_candidates[1] - 1
+  } else {
+    value_end <- wild_caught_rows[2] - 1
+  }
+  
+  # QUANTITY section: rows between second "Total wild-caught" and next "Total" after it
+  tonnes_start <- wild_caught_rows[2] + 1
+  
+  tonnes_end_candidates <- total_rows[total_rows > tonnes_start]
+  if(length(tonnes_end_candidates) > 0) {
+    tonnes_end <- tonnes_end_candidates[1] - 1
+  } else {
+    tonnes_end <- nrow(raw_data)
+  }
+  
+  # Find the header row with years
+  year_pattern <- "[0-9]{4}[-–][0-9]{2}"
+  header_candidates <- which(apply(raw_data, 1, function(row) {
+    any(str_detect(as.character(row), year_pattern))
+  }))
+  
+  if(length(header_candidates) > 0) {
+    header_row <- header_candidates[1]
+  } else {
+    header_row <- 2
+  }
+  
+  # Extract year headers
+  year_headers <- as.character(raw_data[header_row, ])
+  year_headers[1] <- "Species"
+  year_headers[2] <- "Unit"
+  year_headers <- ifelse(is.na(year_headers) | year_headers == "NA", 
+                         paste0("Col_", seq_along(year_headers)), 
+                         year_headers)
+  
+  # --- Extract VALUE section (aquaculture only) ---
+  value_section <- raw_data[value_start:value_end, ]
+  colnames(value_section) <- year_headers
+  
+  value_clean <- value_section %>%
+    filter(!is.na(Species), 
+           Species != "", 
+           !str_detect(Species, "^Total"),
+           !str_detect(Species, "^Aquaculture")) %>%
+    select(-any_of("Unit")) %>%
+    mutate(Species = str_trim(Species)) %>%
+    pivot_longer(
+      cols = -Species,
+      names_to = "Financial_Year",
+      values_to = "Value_AUD_thousands"
+    ) %>%
+    filter(!str_detect(Financial_Year, "^Col_")) %>%
+    mutate(
+      State = state_abbr,
+      Value_AUD_thousands = as.numeric(Value_AUD_thousands)
+    ) %>%
+    filter(!is.na(Value_AUD_thousands))
+  
+  # --- Extract QUANTITY section (aquaculture only) ---
+  tonnes_section <- raw_data[tonnes_start:tonnes_end, ]
+  colnames(tonnes_section) <- year_headers
+  
+  tonnes_clean <- tonnes_section %>%
+    filter(!is.na(Species), 
+           Species != "", 
+           !str_detect(Species, "^Total"),
+           !str_detect(Species, "^Aquaculture")) %>%
+    select(-any_of("Unit")) %>%
+    mutate(Species = str_trim(Species)) %>%
+    pivot_longer(
+      cols = -Species,
+      names_to = "Financial_Year",
+      values_to = "Tonnes"
+    ) %>%
+    filter(!str_detect(Financial_Year, "^Col_")) %>%
+    mutate(
+      State = state_abbr,
+      Tonnes = as.numeric(Tonnes)
+    ) %>%
+    filter(!is.na(Tonnes))
+  
+  # --- Combine value and tonnes ---
+  combined_data <- value_clean %>%
+    full_join(tonnes_clean, by = c("State", "Species", "Financial_Year"))
+  
+  return(combined_data)
+}
+
+# Test on Victoria (VIC) 
+file_path <- here("raw_data/Aquaculture_Production_ABARES_DAFF/02_DataTables_AustFishAquacStats_2024_v1.0.0.xlsx")
+
+test_vic <- extract_aquaculture_data_v3(file_path, "Table 6", "VIC")
+
+cat("\n=== VIC Test Results ===\n")
+cat("Total records:", nrow(test_vic), "\n")
+cat("Unique species:", n_distinct(test_vic$Species), "\n")
+cat("\nSpecies found:\n")
+print(sort(unique(test_vic$Species)))
+
+# Check for wild-caught species (should be NONE)
+wild_caught_check <- c("Southern Rock Lobster", "Prawns", "Crabs", "Abalone", 
+                       "Scallops", "Squids", "Octopus", "Australian Sardine",
+                       "Black Bream", "Southern Garfish", "Sharks & Rays",
+                       "Snapper", "Freshwater Eels", "Australian Salmons",
+                       "King George Whiting", "Other Finfish")
+
+found_wild <- test_vic %>%
+  filter(Species %in% wild_caught_check)
+
+if(nrow(found_wild) > 0) {
+  cat("\n⚠️ WARNING: Found wild-caught species:\n")
+  print(unique(found_wild$Species))
+} else {
+  cat("\n✓ ✓ ✓ PERFECT! No wild-caught species found!\n")
+}
+
+View(test_vic)
+# Process all states
+production_data_AUS <- extract_aquaculture_data_v3(file_path, "Table 4", "AUS")
+production_data_NSW <- extract_aquaculture_data_v3(file_path, "Table 5", "NSW")
+production_data_VIC <- extract_aquaculture_data_v3(file_path, "Table 6", "VIC")
+production_data_QLD <- extract_aquaculture_data_v3(file_path, "Table 7", "QLD")
+production_data_SA <- extract_aquaculture_data_v3(file_path, "Table 8", "SA")
+production_data_WA <- extract_aquaculture_data_v3(file_path, "Table 9", "WA")
+production_data_TAS <- extract_aquaculture_data_v3(file_path, "Table 10", "TAS")
+production_data_NT <- extract_aquaculture_data_v3(file_path, "Table 11", "NT")
+
+# Combine all
+production_data_all_clean <- bind_rows(
+  production_data_AUS,
+  production_data_NSW,
+  production_data_VIC,
+  production_data_QLD,
+  production_data_SA,
+  production_data_WA,
+  production_data_TAS,
+  production_data_NT
+)
+
+
+cat("\n=== All species (should be AQUACULTURE ONLY) ===\n")
+all_species_clean <- production_data_all_clean %>%
+  distinct(Species) %>%
+  arrange(Species)
+print(all_species_clean$Species)
+
+View(production_data_all_clean)
+```
+
+```{r}
+# Create simplified species lookup
+species_lookup_final <- tribble(
+  ~Production_Name,           ~Species,                    ~popular.name,
+  
+  # === BIVALVES ===
+  "Oysters",                  "Oyster spp",               "Oysters (all species)",
+  "Oysters e",                "Oyster spp",               "Oysters (all species)",
+  "Oysters i",                "Oyster spp",               "Oysters (all species)",
+  "Oystersi",                 "Oyster spp",               "Oysters (all species)",
+  
+  "Mussels",                  "Mytilus galloprovincialis", "blue mussel",
+  "Blue Mussel",              "Mytilus galloprovincialis", "blue mussel",
+  
+  "Abalone",                  "Haliotis spp",             "Abalone (all species)",
+  "Abalone e",                "Haliotis spp",             "Abalone (all species)",
+  "Blacklip Abalones",        "Haliotis spp",             "Abalone (all species)",
+  
+  # === FISH ===
+  "Barramundi",               "Lates calcifer",           "Barramundi",
+  "Golden Perch",             "Macquarie ambigua",        "Golden Perch",
+  "Silver Perch",             "Bidyanis bidyanus",        "Silver Perch",
+  "Barcoo Grunter",           "Scortum barcoo",           "Jade perch",
+  "Murray Cod",               "Maccullochella mariensis", "Mary River cod",
+  
+  # === SALMONIDS - ===
+  "Trouts",                   "Oncorhynchus mykiss",      "Rainbow Trout",
+  "Trout",                    "Oncorhynchus mykiss",      "Rainbow Trout",
+  
+   "Salmonids d",              "Salmo salar",              "Salmon",
+  "Salmon",                   "Salmo salar",              "Salmon",
+  "Salmonids c",              "Salmo salar",              "Salmon",
+  
+  # Other fish
+  "Yellowtail Kingfish",      "Seriola lalandi",          "Yellowtail Kingfish",
+  "Snapper",                  "Pagrus auratus",           "Snapper",
+  "Mulloway",                 "Argyrosomus japonicus",    "Mulloway",
+  "Coral Trouts",             "Epinephelinae",            "Grouper",
+  "Southern Bluefin Tuna d",  "Thunnus maccoyii",         "Southern Bluefin Tuna",
+  "Freshwater Eels",          "Anguilla spp",             "Freshwater Eels",
+  
+  # === CRUSTACEANS ===
+  "Prawns",                   "Penaeus spp",              "Prawns (all species)",
+  "Tiger Prawns",             "Penaeus spp",              "Prawns (all species)",
+  "King Prawns",              "Penaeus spp",              "Prawns (all species)",
+  "Banana Prawns",            "Penaeus spp",              "Prawns (all species)",
+  "School Prawns",            "Penaeus spp",              "Prawns (all species)",
+  "Endeavour Prawns",         "Penaeus spp",              "Prawns (all species)",
+  
+  "Yabbies",                  "cherax destructor",        "Yabbies",
+  "Marron",                   "cherax tenuimanus",        "Maroon",
+  "Marron c",                 "cherax tenuimanus",        "Maroon",
+  "Redclaw",                  "Cherax quadricarinatus",   "Red Claw crayfish",
+  
+  # === OTHER ===
+  "Pearls",                   "pearl",                    "pearl",
+  "Pearl Oyster",             "pearl",                    "pearl",
+  "Ornamental species",       "Ornamental species",       "Ornamental species",
+  "Aquarium species d",       "Ornamental species",       "Ornamental species",
+  "Warmwater Finfish d",      "Warmwater finfish",        "Warmwater finfish"
+)
+
+# Update your presence data to match these categories
+Abares_data_long_updated <- Abares_data_long %>%
+  mutate(
+    Species = case_when(
+      # Combine oyster species
+      Species %in% c("Crassostrea gigas", "Saccostrea glomerata", 
+                     "Saccostrea Lineage G/Saccostrea solaris") ~ "Oyster spp",
+      
+      # Combine abalone species
+      Species %in% c("Haliotis laevigata", "Haliotis rubra") ~ "Haliotis spp",
+      
+      # Combine eel species
+      Species %in% c("Anguilla australis", "Anguilla dieffenbachii") ~ "Anguilla spp",
+      
+      # Combine prawn species
+      Species %in% c("Penaeus monodon", "Marsupenaus japonicus") ~ "Penaeus spp",
+      
+      # Keep others as is
+      TRUE ~ Species
+    ),
+    # Update popular names
+    popular.name = case_when(
+      Species == "Oyster spp" ~ "Oysters (all species)",
+      Species == "Haliotis spp" ~ "Abalone (all species)",
+      Species == "Anguilla spp" ~ "Freshwater Eels",
+      Species == "Penaeus spp" ~ "Prawns (all species)",
+      TRUE ~ popular.name
+    )
+  ) %>%
+  # Remove duplicates created by combining - fix the column name here
+  distinct(group, popular.name, Species, aquaculturerealm, AUS, State, Presence)
+
+View(Abares_data_long_updated)
+
+# Check what changed
+cat("\n=== Species combining summary ===\n")
+cat("Original species:", n_distinct(Abares_data_long$Species), "\n")
+cat("Updated species:", n_distinct(Abares_data_long_updated$Species), "\n")
+
+## CORRECTED aggregation
+production_aggregated <- production_data_all_clean %>%
+  left_join(species_lookup_final, 
+            by = c("Species" = "Production_Name"),
+            relationship = "many-to-many") %>%
+  rename(Production_Species = Species,
+         Species = Species.y) %>%
+  select(Species, popular.name, Production_Species, State, Financial_Year, 
+         Value_AUD_thousands, Tonnes) %>%
+  filter(!is.na(Species)) %>%
+  group_by(Species, popular.name, State, Financial_Year) %>%
+  summarise(
+    Value_AUD_thousands = sum(Value_AUD_thousands, na.rm = TRUE),
+    Tonnes = sum(Tonnes, na.rm = TRUE),
+    Production_Species_list = paste(unique(Production_Species), collapse = " + "),
+    n_source_records = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    Value_AUD_thousands = ifelse(Value_AUD_thousands == 0, NA_real_, Value_AUD_thousands),
+    Tonnes = ifelse(Tonnes == 0, NA_real_, Tonnes)
+  )
+
+# Check Tasmania salmon specifically
+tas_salmon_check <- production_aggregated %>%
+  filter(State == "TAS", Species == "Salmo salar") %>%
+  arrange(desc(Financial_Year))
+
+cat("\n=== Tasmania Salmon (should be HUGE!) ===\n")
+print(head(tas_salmon_check, 10))
+
+# Check aggregation results
+agg_summary <- production_aggregated %>%
+  group_by(Species, popular.name) %>%
+  summarise(
+    n_states = n_distinct(State),
+    n_years = n_distinct(Financial_Year),
+    has_value = sum(!is.na(Value_AUD_thousands)) > 0,
+    has_tonnes = sum(!is.na(Tonnes)) > 0,
+    .groups = "drop"
+  )
+
+cat("\n=== Production Data Summary ===\n")
+print(agg_summary, n = 50)
+
+# Final join
+Abares_data_enriched <- Abares_data_long_updated %>%
+  left_join(
+    production_aggregated,
+    by = c("State", "Species", "popular.name"),
+    relationship = "many-to-many"
+  )
+
+View(Abares_data_enriched)
+
+# Summary statistics
+enrichment_summary <- Abares_data_enriched %>%
+  group_by(Species, popular.name, State) %>%
+  summarise(
+    has_data = any(!is.na(Financial_Year)),
+    n_years = sum(!is.na(Financial_Year)),
+    .groups = "drop"
+  ) %>%
+  left_join(Abares_data_long_updated %>% distinct(Species, group), by = "Species")
+
+cat("\n=== Final Integration Summary ===\n")
+cat("Total species-state combinations:", nrow(enrichment_summary), "\n")
+cat("With production data:", sum(enrichment_summary$has_data), "\n")
+cat("Without production data:", sum(!enrichment_summary$has_data), "\n")
+cat("Match rate:", round(sum(enrichment_summary$has_data) / nrow(enrichment_summary) * 100, 1), "%\n")
+
+# Species without data
+no_data <- enrichment_summary %>%
+  filter(!has_data) %>%
+  arrange(group, popular.name, State)
+
+cat("\n=== Species without production data ===\n")
+print(no_data, n = 100)
+
+# Get most recent year for each species-state
+production_latest <- Abares_data_enriched %>%
+  filter(!is.na(Financial_Year)) %>%
+  group_by(Species, popular.name, State, group, aquaculturerealm) %>%
+  filter(Financial_Year == max(Financial_Year)) %>%
+  slice(1) %>%
+  ungroup()
+
+View(production_latest)
+
+# State-level totals (latest year)
+state_totals <- production_latest %>%
+  group_by(State) %>%
+  summarise(
+    n_species = n_distinct(Species),
+    total_value_millions = sum(Value_AUD_thousands, na.rm = TRUE) / 1000,
+    total_tonnes = sum(Tonnes, na.rm = TRUE),
+    latest_year = max(Financial_Year),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_value_millions))
+
+cat("\n=== ✓✓✓ CORRECTED STATE TOTALS (TASMANIA SHOULD BE #1!) ✓✓✓ ===\n")
+print(state_totals)
+
+# Top species by value
+top_species <- production_latest %>%
+  group_by(Species, popular.name, group) %>%
+  summarise(
+    total_value_millions = sum(Value_AUD_thousands, na.rm = TRUE) / 1000,
+    total_tonnes = sum(Tonnes, na.rm = TRUE),
+    n_states = n_distinct(State),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_value_millions)) %>%
+  head(15)
+
+cat("\n=== Top 15 Species (SALMON SHOULD BE #1!) ===\n")
+print(top_species)
+
+# Create the processed_data folder if it doesn't exist
+if (!dir.exists(here("processed_data"))) {
+  dir.create(here("processed_data"), recursive = TRUE)
+  cat("Created processed_data folder\n")
+}
+
+# Top species across multiple years for comparison
+# USE Abares_data_enriched (which has all years), not production_latest
+top_species_multi_year <- Abares_data_enriched %>%
+  filter(Financial_Year %in% c("2020–21", "2021–22", "2022–23")) %>%
+  filter(!is.na(Value_AUD_thousands)) %>%  # Only rows with production data
+  group_by(Species, popular.name, group, Financial_Year) %>%
+  summarise(
+    total_value_millions = sum(Value_AUD_thousands, na.rm = TRUE) / 1000,
+    total_tonnes = sum(Tonnes, na.rm = TRUE),
+    n_states = n_distinct(State),
+    .groups = "drop"
+  ) %>%
+  arrange(Species, Financial_Year)
+
+cat("\n=== Checking filtered data ===\n")
+cat("Rows after filtering:", nrow(top_species_multi_year), "\n")
+
+# Get top 15 species by average value across all three years
+top_species_list <- top_species_multi_year %>%
+  group_by(Species, popular.name, group) %>%
+  summarise(avg_value = mean(total_value_millions, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(avg_value)) %>%
+  head(15) %>%
+  pull(Species)
+
+# Filter to just those top 15 species
+top_species_comparison <- top_species_multi_year %>%
+  filter(Species %in% top_species_list) %>%
+  arrange(desc(total_value_millions))
+
+cat("\n=== Top 15 Species Comparison: 2020–21, 2021–22, 2022–23 ===\n")
+print(top_species_comparison, n = 50)
+
+# Create a wide format for easier comparison
+top_species_wide <- top_species_comparison %>%
+  select(Species, popular.name, group, Financial_Year, total_value_millions, total_tonnes) %>%
+  pivot_wider(
+    names_from = Financial_Year,
+    values_from = c(total_value_millions, total_tonnes),
+    names_sep = "_"
+  )
+
+cat("\n=== Wide Format (easier to read!) ===\n")
+print(top_species_wide, n = 20)
+
+# Save everything - ALL WITH row.names NOT row_names
+write.csv(Abares_data_enriched, 
+          here("processed_data", "aquaculture_complete_dataset.csv"), 
+          row.names = FALSE)
+
+write.csv(production_latest, 
+          here("processed_data", "aquaculture_latest_year.csv"), 
+          row.names = FALSE)
+
+write.csv(state_totals, 
+          here("processed_data", "state_totals_latest_CORRECTED.csv"), 
+          row.names = FALSE)
+
+write.csv(top_species,
+          here("processed_data", "top_species_CORRECTED.csv"),
+          row.names = FALSE)
+
+write.csv(top_species_comparison,
+          here("processed_data", "top_species_multi_year_long.csv"),
+          row.names = FALSE)
+
+write.csv(top_species_wide,
+          here("processed_data", "top_species_multi_year_wide.csv"),
+          row.names = FALSE)
+
+cat("\n✓ All files saved successfully!\n")
+cat("Files location:", here("processed_data"), "\n")
+```
+
+
+```{r}
+# Create the processed_data folder if it doesn't exist
+if (!dir.exists(here("processed_data"))) {
+  dir.create(here("processed_data"), recursive = TRUE)
+  cat("Created processed_data folder\n")
+}
+
+# Top species across multiple years for comparison
+top_species_multi_year <- Abares_data_enriched %>%
+  filter(Financial_Year %in% c("2020–21", "2021–22", "2022–23")) %>%  # USE EN-DASHES!
+  filter(!is.na(Value_AUD_thousands)) %>%  # Only rows with production data
+  group_by(Species, popular.name, group, Financial_Year) %>%
+  summarise(
+    total_value_millions = sum(Value_AUD_thousands, na.rm = TRUE) / 1000,
+    total_tonnes = sum(Tonnes, na.rm = TRUE),
+    n_states = n_distinct(State),
+    .groups = "drop"
+  ) %>%
+  arrange(Species, Financial_Year)
+
+# Get top 15 species by average value across all three years
+top_species_list <- top_species_multi_year %>%
+  group_by(Species, popular.name, group) %>%
+  summarise(avg_value = mean(total_value_millions, na.rm = TRUE), .groups = "drop") %>%
+  arrange(desc(avg_value)) %>%
+  head(15) %>%
+  pull(Species)
+
+# Filter to just those top 15 species
+top_species_comparison <- top_species_multi_year %>%
+  filter(Species %in% top_species_list) %>%
+  arrange(desc(total_value_millions))
+
+cat("\n=== Top 15 Species Comparison: 2020–21, 2021–22, 2022–23 ===\n")
+print(top_species_comparison, n = 50)
+
+# Create a wide format for easier comparison
+top_species_wide <- top_species_comparison %>%
+  select(Species, popular.name, group, Financial_Year, total_value_millions, total_tonnes) %>%
+  pivot_wider(
+    names_from = Financial_Year,
+    values_from = c(total_value_millions, total_tonnes),
+    names_sep = "_"
+  )
+
+cat("\n=== Wide Format (easier to read!) ===\n")
+print(top_species_wide, n = 20)
+
+# Save the new multi-year files
+write.csv(top_species_comparison,
+          here("processed_data", "top_species_multi_year_long.csv"),
+          row.names = FALSE)
+
+write.csv(top_species_wide,
+          here("processed_data", "top_species_multi_year_wide.csv"),
+          row.names = FALSE)
+
+cat("\n✓ Multi-year comparison files saved!\n")
+```
+
+#MAP
+# scale_fill_viridis_c() = for continuous variables (like your first map with numerical values)
+#scale_fill_viridis_d() = for discrete categories (like groups: Bivalves, Fish, Crustacean)
+#viridis options:
+#option = "A" (magma)
+#option = "B" (inferno)
+#option = "C" (plasma) ← default
+#option = "D" (viridis)
+#option = "E" (cividis)
+
+```{r}
+library(ggplot2)
+
+# Map: State production value
+state_map <- AUS_states %>%
+  left_join(state_totals, by = "State") %>%
+  ggplot() +
+  geom_sf(aes(fill = total_value_millions), color = "white", size = 0.5) +
+  scale_fill_viridis_c(
+    option = "C",
+    na.value = "grey90",
+    labels = scales::comma,
+    name = "Value\n(AUD$ millions)"
+  ) +
+  theme_minimal() +
+  labs(
+    title = "Australian Aquaculture Production Value by State",
+    subtitle = paste("Financial year:", unique(state_totals$latest_year)),
+    caption = "Source: ABARES 2024"
+  ) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 10)
+  )
+
+print(state_map)
+
+ggsave(
+  filename = here("Figures", "State_production_value_map.png"),
+  plot = state_map,
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+
+# Bar chart: Top 10 species
+top_species_plot <- production_latest %>%
+  group_by(Species, popular.name, group) %>%
+  summarise(
+    total_value_millions = sum(Value_AUD_thousands, na.rm = TRUE) / 1000,
+    .groups = "drop"
+  ) %>%
+  arrange(desc(total_value_millions)) %>%
+  slice(1:10) %>%  # Top 10 species
+  ggplot(aes(x = reorder(popular.name, total_value_millions), 
+             y = total_value_millions,
+             fill = group)) +
+  geom_col() +
+  coord_flip() +
+   scale_fill_viridis_d(option = "D") +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Top 10 Aquaculture Species by Production Value",
+    subtitle = paste("Australia, Financial year:", unique(production_latest$Financial_Year)),
+    x = NULL,
+    y = "Production Value ($ millions)",
+    fill = "Species Group",
+    caption = "Source: ABARES 2024"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "bottom"
+  )
+
+print(top_species_plot)
+
+ggsave(
+  filename = here("Figures", "Top10_species_by_value.png"),
+  plot = top_species_plot,
+  width = 10,
+  height = 8,
+  dpi = 300
+)
+
+# Stacked bar: Production by group and state
+group_state_plot <- production_latest %>%
+  group_by(State, group) %>%
+  summarise(total_value_millions = sum(Value_AUD_thousands, na.rm = TRUE) / 1000,
+            .groups = "drop") %>%
+  ggplot(aes(x = reorder(State, total_value_millions), 
+             y = total_value_millions, 
+             fill = group)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_viridis_d(option = "D") +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title = "Aquaculture Production Value by State and Species Group",
+    subtitle = paste("Financial year:", unique(production_latest$Financial_Year)),
+    x = "State",
+    y = "Production Value (AUD$ millions)",
+    fill = "Species Group",
+    caption = "Source: ABARES 2024"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "right"
+  )
+
+print(group_state_plot)
+
+ggsave(
+  filename = here("Figures", "Production_by_state_and_group.png"),
+  plot = group_state_plot,
+  width = 10,
+  height = 6,
+  dpi = 300
+)
+
+cat("\n✓ All visualizations saved!\n")
+```
+#CHECK production of other years
+```{r}
+# Define the years you want to analyze
+selected_years <- c("2020–21", "2021–22", "2022–23", "2023–24p")
+
+# Filter for specific years instead of just latest
+production_selected_years <- Abares_data_enriched %>%
+  filter(Financial_Year %in% selected_years) %>%
+  filter(!is.na(Financial_Year))
+
+# State-level totals BY YEAR
+state_totals_by_year <- production_selected_years %>%
+  group_by(State, Financial_Year) %>%
+  summarise(
+    n_species = n_distinct(Species),
+    total_value_millions = sum(Value_AUD_thousands, na.rm = TRUE) / 1000,
+    total_tonnes = sum(Tonnes, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(Financial_Year, desc(total_value_millions))
+
+cat("\n=== State Production Totals BY YEAR ===\n")
+print(state_totals_by_year, n = 100)
+
+# Top species by value BY YEAR
+top_species_by_year <- production_selected_years %>%
+  group_by(Financial_Year, Species, popular.name, group) %>%
+  summarise(
+    total_value_millions = sum(Value_AUD_thousands, na.rm = TRUE) / 1000,
+    total_tonnes = sum(Tonnes, na.rm = TRUE),
+    n_states = n_distinct(State),
+    .groups = "drop"
+  ) %>%
+  group_by(Financial_Year) %>%
+  arrange(Financial_Year, desc(total_value_millions)) %>%
+  slice(1:10) %>%  # Top 10 per year
+  ungroup()
+
+cat("\n=== Top 10 Species by Value BY YEAR ===\n")
+print(top_species_by_year, n = 100)
+
+# Group-level summary BY YEAR
+group_summary_by_year <- production_selected_years %>%
+  group_by(Financial_Year, group) %>%
+  summarise(
+    n_species = n_distinct(Species),
+    total_value_millions = sum(Value_AUD_thousands, na.rm = TRUE) / 1000,
+    total_tonnes = sum(Tonnes, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(Financial_Year, desc(total_value_millions))
+
+cat("\n=== Production by Group BY YEAR ===\n")
+print(group_summary_by_year, n = 100)
+```
+#trends over time
+```{r}
+# Line plot: State production over time
+state_trend_plot <- state_totals_by_year %>%
+  ggplot(aes(x = Financial_Year, y = total_value_millions, 
+             color = State, group = State)) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  scale_color_viridis_d(option = "D") +
+  theme_minimal() +
+  labs(
+    title = "Aquaculture Production Value Trends by State",
+    x = "Financial Year",
+    y = "Production Value ($ millions)",
+    color = "State"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(state_trend_plot)
+```
+
+

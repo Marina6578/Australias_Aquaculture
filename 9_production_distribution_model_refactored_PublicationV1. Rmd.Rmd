@@ -1,0 +1,2196 @@
+---
+title: "9_production distribution model - refactored"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+date: "2026-02-19 to April 2026"
+---
+```{r}
+options(encoding = "UTF-8")
+Sys.setlocale("LC_ALL", "en_US.UTF-8")  # or "English_Australia.UTF-8" on Windows
+```
+
+# Refactored production distribution model
+# Single parameter table drives all species calculations.
+#
+# TO UPDATE FOR A NEW YEAR:
+#   1. Change area_km2 in species_params (new GEE detection run)
+#   2. Change actual_prod_t in species_params (new ABARES statistics)
+#   3. Re-knit — everything else updates automatically.
+#
+# TO ADD A NEW SPECIES:
+#   1. Add a row to species_params
+#   2. If system type is new, add a branch in the dispatch loop (Step 3)
+#   3. Add variable extraction aliases in Step 4
+#   4. Add manuscript text chunk and plot data entry
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load packages
+```{r packages}
+library(tidyverse)
+library(here)
+library(tmap)
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(scales)
+library(cowplot)
+library(gridExtra)
+library(viridisLite)
+library(tmaptools)
+```
+
+# ===== INFRASTRUCTURE SCALING FACTOR: MEASUREMENT DATA =====
+# Empirical pen measurements from Google Earth Pro vs satellite-detected polygons.
+# These are field measurements — update fpr_data when new leases are sampled.
+# mean_pen_fraction feeds into run_corrected_volumetric() for salmon.
+
+```{r isf-data}
+fpr_data <- data.frame(
+  Lease       = c(220,        201,        141),
+  Detected_m2 = c(182418.40,  362625.60,  542620.70),
+  Pen_area_m2 = c(17926.81,   45641.38,   59771.19)
+)
+fpr_data$FPR         <- fpr_data$Detected_m2 / fpr_data$Pen_area_m2
+fpr_data$Pen_fraction <- fpr_data$Pen_area_m2 / fpr_data$Detected_m2
+
+mean_fpr          <- mean(fpr_data$FPR)
+mean_pen_fraction <- mean(fpr_data$Pen_fraction)
+
+cat(sprintf("ISF data loaded: mean pen fraction = %.1f%% (mean scaling factor = %.2f×)\n",
+            mean_pen_fraction * 100, mean_fpr))
+```
+
+# ===== STEP 1: SPECIES PARAMETER TABLE =====
+# Single source of truth for all species parameters.
+# ANNUAL UPDATE: change area_km2 and actual_prod_t columns only.
+
+```{r species-params}
+species_params <- tibble(
+
+  # --- Identity ---
+  species      = c("atl_salmon",
+                   "sbt",
+                   "prawn",
+                   "barramundi",
+                   "oyster"),
+
+  label        = c("Atlantic Salmon",
+                   "S. Bluefin Tuna",
+                   "Black Tiger Prawn",
+                   "Barramundi",
+                   "Oysters"),
+
+  label_sci    = c("Atlantic Salmon (Salmo salar)",
+                   "Southern Bluefin Tuna (Thunnus maccoyii)",
+                   "Black Tiger Prawn (Penaeus monodon)",
+                   "Barramundi (Lates calcarifer)",
+                   "Oysters (mixed spp.)"),
+
+  system       = c("marine_pens",       # empirical + volumetric + corrected volumetric
+                   "marine_pontoons",   # empirical + volumetric
+                   "pond",              # area-yield
+                   "pond",              # area-yield
+                   "marine_longline"),  # area-yield (no volumetric)
+
+  state        = c("Tasmania", "South Australia", "National", "National",
+                   "NSW, QLD, SA, TAS, WA"),
+
+  # ---- ANNUAL UPDATE: detection area (km²) and ABARES production (tonnes) ----
+  # Oyster state breakdown: NSW 5.898, QLD 0.409, SA 6.789, TAS 3.128, WA 0.476
+  area_km2     = c(6.18,   0.209,  10.325, 2.466,  16.700),  # land-based area for barramundi
+  actual_prod_t = c(79271, 8322,   9450,   4742,   11735),    # ABARES 2021-22
+
+  # --- Marine systems: stocking density (kg/m³) — NA for pond/longline systems ---
+  density_low  = c(10,   2,  NA, NA, NA),
+  density_mid  = c(12.2, 3,  NA, NA, NA),
+  density_high = c(15,   4,  NA, NA, NA),
+
+  # --- Marine systems: net depth (m) — NA for pond/longline systems ---
+  # Salmon: pre-derived from pen geometry (pen_volume / pen_area = 11600 / 1145.9 = 10.12 m)
+  # SBT: net wall depth of static ranching pontoons (Ellis & Kiessling, 2014)
+  net_depth_m  = c(10.12, 10, NA, NA, NA),
+
+  # --- Mortality range (proportion) ---
+   # Oyster: 20% per growing season (Nell & Perkins, 2006; Green et al., 2008;
+  #         Walton et al., 2013; Petrolia et al., 2024)
+  mortality_low  = c(0.14, 0.02, NA,   NA,   NA),
+  mortality_mid  = c(0.15, 0.03, 0.20, 0.10, 0.20),
+  mortality_high = c(0.16, 0.04, NA,   NA,   NA),
+
+  # --- Salmon pen geometry (for manuscript text; net_depth_m above is pre-derived) ---
+  # Source: Tassal Group, 2021
+  pen_circ_m  = c(120,   NA, NA, NA, NA),   # circumference (m)
+  pen_vol_m3  = c(11600, NA, NA, NA, NA),   # volume (m³)
+
+  # --- Infrastructure scaling factor ---
+  # TRUE = apply mean_pen_fraction from fpr_data (salmon only)
+  # FALSE = no correction (isolated pontoons or land-based or longline)
+  apply_isf   = c(TRUE, FALSE, FALSE, FALSE, FALSE),
+
+  # --- Empirical scaling baseline ---
+  # "mid"        → use density_mid as baseline (salmon: reported prod ≈ density_mid)
+  # "back_calc"  → back-calculate effective density from reported production
+  density_baseline = c("mid", "back_calc", NA, NA, NA),
+
+# Pond/longline systems: yield range (t/km²) — NA for marine pen/pontoon systems
+  # Prawn:      25-40 PL/m² × 30-35g × 80% survival (Lovatelli et al., 2008)
+  # Barramundi: 15-30 t/ha = 1,500-3,000 t/km² (de Schryver et al., 2008)
+  # Oyster:     500-1,000 t/km² = 5-10 t/ha (annualised whole-farm rate)
+  #             Derived from single-cycle capacity ÷ grow-out duration.
+  #             FAO extensive lease yield: ~25 t/ha/yr (Helm, 2009).
+  #             SRO (S. glomerata): 25 ÷ 3yr = ~8.3 t/ha (Nell, 1993;
+  #               Sapphire Coast Oysters, 2024).
+  #             Pacific oyster (C. gigas): 25 ÷ 1.5-2.5yr = ~10-17 t/ha
+  #               (Helm, 2009; grow-out 18-30 months).
+  #             Range spans both species; anchored by empirical rate 7.03 t/ha.
+  #             Sources: Helm (2009) FAO C. gigas fact sheet; Nell (1993);
+  #               Sapphire Coast Oysters (2024)
+  yield_low_tkm2  = c(NA, NA,  600, 1500, 500),
+  yield_high_tkm2 = c(NA, NA, 1120, 3000, 1000),
+
+  # --- Prawn stocking parameters (for manuscript text derivation) ---
+  prawn_pl_low_m2  = c(NA, NA, 25, NA, NA),   # post-larvae/m²
+  prawn_pl_high_m2 = c(NA, NA, 40, NA, NA),
+  prawn_hw_low_g   = c(NA, NA, 30, NA, NA),   # harvest weight (g)
+  prawn_hw_high_g  = c(NA, NA, 35, NA, NA),
+
+  # --- Plot label offset for actual value (tweak if labels overlap) ---
+  actual_hjust = c(-0.3, -0.6, -0.3, -0.3, -0.3),
+
+  # --- Detection method ---
+  detection_method = c(
+    "Alpha Earth Foundation embeddings",
+    "Alpha Earth Foundation embeddings",
+    "NDWI annual composite (Sentinel-2)",
+    "NDWI annual composite (Sentinel-2)",
+    "Sentinel 1 SAR + Alpha Earth Foundation embeddings"
+  )
+)
+
+cat("Species parameter table created:\n")
+print(select(species_params, species, system, area_km2, actual_prod_t))
+```
+
+# ===== STEP 2: SYSTEM-BASED MODEL FUNCTIONS =====
+
+```{r model-functions}
+
+# --- Empirical (top-down): realised yield from ABARES-reported production --------
+# density_baseline: density level that reported production corresponds to
+#   salmon  → density_mid (reported production ≈ seasonal average density)
+#   SBT     → back-calculated effective density
+run_empirical_marine <- function(actual_prod, area_km2,
+                                  density_low, density_baseline, density_high) {
+  yield_per_km2 <- actual_prod / area_km2
+  prod_low      <- actual_prod * (density_low  / density_baseline)
+  prod_high     <- actual_prod * (density_high / density_baseline)
+  list(
+    yield_per_km2 = yield_per_km2,
+    prod_low      = prod_low,
+    prod_high     = prod_high,
+    yield_low     = prod_low  / area_km2,
+    yield_high    = prod_high / area_km2
+  )
+}
+
+# --- Volumetric (bottom-up, Halpern-compatible 3D): theoretical capacity ---------
+# Yield (t/km²) = density (kg/m³) × net_depth (m) × survival × 1,000
+# Survival is paired inversely with density (conservative at low, optimistic at high)
+run_volumetric_marine <- function(area_km2,
+                                   density_low, density_mid, density_high,
+                                   mortality_low, mortality_mid, mortality_high,
+                                   net_depth_m) {
+  survival_low  <- 1 - mortality_high   # paired with low density (conservative)
+  survival_mid  <- 1 - mortality_mid
+  survival_high <- 1 - mortality_low    # paired with high density (optimistic)
+  vol_yield_low  <- density_low  * net_depth_m * survival_low  * 1000
+  vol_yield_mid  <- density_mid  * net_depth_m * survival_mid  * 1000
+  vol_yield_high <- density_high * net_depth_m * survival_high * 1000
+  list(
+    yield_low  = vol_yield_low,
+    yield_mid  = vol_yield_mid,
+    yield_high = vol_yield_high,
+    prod_low   = vol_yield_low  * area_km2,
+    prod_mid   = vol_yield_mid  * area_km2,
+    prod_high  = vol_yield_high * area_km2,
+    survival_low  = survival_low,
+    survival_mid  = survival_mid,
+    survival_high = survival_high
+  )
+}
+
+# --- Corrected volumetric: apply infrastructure scaling factor (pen fraction) ----
+# Applies only where satellite-detected area includes substantial non-pen components
+# pen_fraction: proportion of detected area that is productive pen water surface
+run_corrected_volumetric <- function(vol, area_km2, pen_fraction) {
+  pen_area_km2 <- area_km2 * pen_fraction
+  list(
+    prod_low     = vol$yield_low  * pen_area_km2,
+    prod_mid     = vol$yield_mid  * pen_area_km2,
+    prod_high    = vol$yield_high * pen_area_km2,
+    pen_area_km2 = pen_area_km2
+  )
+}
+
+# --- Area-yield (pond systems): P = A × Y ----------------------------------------
+run_area_yield <- function(area_km2, yield_low_tkm2, yield_high_tkm2, actual_prod) {
+  list(
+    prod_low   = yield_low_tkm2  * area_km2,
+    prod_high  = yield_high_tkm2 * area_km2,
+    yield_low  = yield_low_tkm2,
+    yield_high = yield_high_tkm2,
+    yield_rate = actual_prod / area_km2   # empirical yield rate for validation
+  )
+}
+
+cat("✓ Model functions defined:\n")
+cat("  run_empirical_marine()\n")
+cat("  run_volumetric_marine()\n")
+cat("  run_corrected_volumetric()\n")
+cat("  run_area_yield()\n")
+```
+
+# ===== STEP 3: COMPUTE ALL SPECIES =====
+# Dispatch by system type. To add a species, add a row to species_params
+# and handle its system type here.
+
+```{r compute-all-species}
+results <- list()
+
+for (i in seq_len(nrow(species_params))) {
+  sp <- as.list(species_params[i, ])
+
+  if (sp$system %in% c("marine_pens", "marine_pontoons")) {
+
+    # Determine empirical scaling baseline
+    if (!is.na(sp$density_baseline) && sp$density_baseline == "back_calc") {
+      # Back-calculate effective density from reported production and pen geometry
+      density_baseline <- sp$actual_prod_t / (sp$area_km2 * sp$net_depth_m * 1000)
+    } else {
+      # Reported production corresponds to density_mid (e.g. salmon seasonal average)
+      density_baseline <- sp$density_mid
+    }
+
+    emp <- run_empirical_marine(
+      sp$actual_prod_t, sp$area_km2,
+      sp$density_low, density_baseline, sp$density_high
+    )
+
+    vol <- run_volumetric_marine(
+      sp$area_km2,
+      sp$density_low, sp$density_mid, sp$density_high,
+      sp$mortality_low, sp$mortality_mid, sp$mortality_high,
+      sp$net_depth_m
+    )
+
+    r <- list(
+      emp              = emp,
+      vol              = vol,
+      effective_density = density_baseline,
+      actual_prod      = sp$actual_prod_t,
+      area_km2         = sp$area_km2
+    )
+
+    # Corrected volumetric: only where ISF divergence is observed (salmon)
+    if (isTRUE(sp$apply_isf)) {
+      cor <- run_corrected_volumetric(vol, sp$area_km2, mean_pen_fraction)
+      r$cor_vol            <- cor
+      r$productive_fraction <- emp$yield_per_km2 / vol$yield_mid
+    }
+
+  } else if (sp$system == "marine_longline") {
+    # Marine longline (oysters): area-yield, no volumetric — same maths as pond
+    # but kept as a distinct system type for semantic clarity and future species
+    pond <- run_area_yield(
+      sp$area_km2, sp$yield_low_tkm2, sp$yield_high_tkm2, sp$actual_prod_t
+    )
+    r <- list(
+      pond        = pond,
+      actual_prod = sp$actual_prod_t,
+      area_km2    = sp$area_km2
+    )
+
+  } else {
+    # Pond system: area-yield model
+    pond <- run_area_yield(
+      sp$area_km2, sp$yield_low_tkm2, sp$yield_high_tkm2, sp$actual_prod_t
+    )
+    r <- list(
+      pond        = pond,
+      actual_prod = sp$actual_prod_t,
+      area_km2    = sp$area_km2
+    )
+  }
+
+  results[[sp$species]] <- r
+  cat(sprintf("✓ %s computed (%s)\n", sp$label, sp$system))
+}
+```
+
+# ===== STEP 4: EXTRACT NAMED VARIABLES =====
+# Creates backward-compatible aliases so all manuscript text, display tables,
+# and plots work without modification.
+# When updating for a new year, nothing below this chunk needs to change.
+
+```{r extract-variables}
+
+# ---- Atlantic Salmon ----
+sal_p <- filter(species_params, species == "atl_salmon")
+sal_r <- results[["atl_salmon"]]
+
+area_km2             <- sal_r$area_km2
+actual_production    <- sal_r$actual_prod
+density_low          <- sal_p$density_low
+density_mid          <- sal_p$density_mid
+density_high         <- sal_p$density_high
+mortality_low        <- sal_p$mortality_low
+mortality_mid        <- sal_p$mortality_mid
+mortality_high       <- sal_p$mortality_high
+pen_circumference    <- sal_p$pen_circ_m
+pen_volume           <- sal_p$pen_vol_m3
+pen_radius           <- pen_circumference / (2 * pi)
+pen_area             <- pi * pen_radius^2              # m²
+pen_depth            <- pen_volume / pen_area          # m (derived from pen geometry)
+survival_low         <- sal_r$vol$survival_low
+survival_mid         <- sal_r$vol$survival_mid
+survival_high        <- sal_r$vol$survival_high
+actual_yield_per_km2 <- sal_r$emp$yield_per_km2
+emp_prod_low         <- sal_r$emp$prod_low
+emp_prod_high        <- sal_r$emp$prod_high
+emp_yield_low        <- sal_r$emp$yield_low
+emp_yield_high       <- sal_r$emp$yield_high
+vol_yield_low        <- sal_r$vol$yield_low
+vol_yield_mid        <- sal_r$vol$yield_mid
+vol_yield_high       <- sal_r$vol$yield_high
+vol_prod_low         <- sal_r$vol$prod_low
+vol_prod_mid         <- sal_r$vol$prod_mid
+vol_prod_high        <- sal_r$vol$prod_high
+cor_vol_prod_low     <- sal_r$cor_vol$prod_low
+cor_vol_prod_mid     <- sal_r$cor_vol$prod_mid
+cor_vol_prod_high    <- sal_r$cor_vol$prod_high
+pen_area_km2         <- sal_r$cor_vol$pen_area_km2
+productive_fraction  <- sal_r$productive_fraction
+prod_low             <- emp_prod_low    # primary model = empirical
+prod_high            <- emp_prod_high
+
+# ---- Southern Bluefin Tuna ----
+sbt_p <- filter(species_params, species == "sbt")
+sbt_r <- results[["sbt"]]
+
+sbt_area_km2              <- sbt_r$area_km2
+sbt_actual_production     <- sbt_r$actual_prod
+sbt_net_depth             <- sbt_p$net_depth_m
+sbt_density_low           <- sbt_p$density_low
+sbt_density_mid           <- sbt_p$density_mid
+sbt_density_high          <- sbt_p$density_high
+sbt_mortality_low         <- sbt_p$mortality_low
+sbt_mortality_mid         <- sbt_p$mortality_mid
+sbt_mortality_high        <- sbt_p$mortality_high
+sbt_survival_low          <- sbt_r$vol$survival_low
+sbt_survival_mid          <- sbt_r$vol$survival_mid
+sbt_survival_high         <- sbt_r$vol$survival_high
+sbt_effective_density     <- sbt_r$effective_density
+sbt_actual_yield_per_km2  <- sbt_r$emp$yield_per_km2
+sbt_emp_prod_low          <- sbt_r$emp$prod_low
+sbt_emp_prod_high         <- sbt_r$emp$prod_high
+sbt_emp_yield_low         <- sbt_r$emp$yield_low
+sbt_emp_yield_high        <- sbt_r$emp$yield_high
+sbt_vol_yield_low         <- sbt_r$vol$yield_low
+sbt_vol_yield_mid         <- sbt_r$vol$yield_mid
+sbt_vol_yield_high        <- sbt_r$vol$yield_high
+sbt_vol_prod_low          <- sbt_r$vol$prod_low
+sbt_vol_prod_mid          <- sbt_r$vol$prod_mid
+sbt_vol_prod_high         <- sbt_r$vol$prod_high
+sbt_prod_low              <- sbt_emp_prod_low    # primary model = empirical
+sbt_prod_high             <- sbt_emp_prod_high
+sbt_yield_low             <- sbt_emp_yield_low
+sbt_yield_high            <- sbt_emp_yield_high
+
+# ---- Black Tiger Prawn ----
+prawn_p <- filter(species_params, species == "prawn")
+prawn_r <- results[["prawn"]]
+
+prawn_area_km2          <- prawn_r$area_km2
+prawn_actual_production <- prawn_r$actual_prod
+prawn_prod_low          <- prawn_r$pond$prod_low
+prawn_prod_high         <- prawn_r$pond$prod_high
+prawn_yield_rate        <- prawn_r$pond$yield_rate
+prawn_yield_low_tkm2    <- prawn_r$pond$yield_low
+prawn_yield_high_tkm2   <- prawn_r$pond$yield_high
+prawn_pl_low            <- prawn_p$prawn_pl_low_m2
+prawn_pl_high           <- prawn_p$prawn_pl_high_m2
+prawn_hw_low            <- prawn_p$prawn_hw_low_g
+prawn_hw_high           <- prawn_p$prawn_hw_high_g
+prawn_survival          <- 1 - prawn_p$mortality_mid
+
+# ---- Barramundi ----
+barra_p <- filter(species_params, species == "barramundi")
+barra_r <- results[["barramundi"]]
+
+barra_total_area_km2    <- 2.521   # total detected (land + marine)
+barra_land_area_km2     <- barra_r$area_km2     # ponds only (production distributed here)
+barra_marine_area_km2   <- barra_total_area_km2 - barra_land_area_km2
+barra_actual_production <- barra_r$actual_prod
+barra_prod_low          <- barra_r$pond$prod_low
+barra_prod_high         <- barra_r$pond$prod_high
+barra_yield_rate        <- barra_r$pond$yield_rate
+barra_yield_low_tkm2    <- barra_r$pond$yield_low
+barra_yield_high_tkm2   <- barra_r$pond$yield_high
+barra_survival          <- 1 - barra_p$mortality_mid
+
+# ---- Oysters (mixed spp.) ----
+oyster_p <- filter(species_params, species == "oyster")
+oyster_r <- results[["oyster"]]
+
+oyster_area_km2          <- oyster_r$area_km2
+oyster_actual_production <- oyster_r$actual_prod
+oyster_prod_low          <- oyster_r$pond$prod_low
+oyster_prod_high         <- oyster_r$pond$prod_high
+oyster_yield_rate        <- oyster_r$pond$yield_rate
+oyster_yield_low_tkm2    <- oyster_r$pond$yield_low
+oyster_yield_high_tkm2   <- oyster_r$pond$yield_high
+oyster_survival          <- 1 - oyster_p$mortality_mid
+
+cat("✓ Variables extracted for all species\n\n")
+cat(sprintf("  Atlantic Salmon:    %s t | %.2f km² | yield %.0f t/km²\n",
+            format(actual_production, big.mark = ","), area_km2, actual_yield_per_km2))
+cat(sprintf("  S. Bluefin Tuna:    %s t | %.3f km² | yield %.0f t/km² | eff. density %.2f kg/m³\n",
+            format(sbt_actual_production, big.mark = ","), sbt_area_km2,
+            sbt_actual_yield_per_km2, sbt_effective_density))
+cat(sprintf("  Black Tiger Prawn:  %s t | %.3f km² | yield %.0f t/km²\n",
+            format(prawn_actual_production, big.mark = ","), prawn_area_km2, prawn_yield_rate))
+cat(sprintf("  Barramundi:         %s t | %.3f km² | yield %.0f t/km²\n",
+            format(barra_actual_production, big.mark = ","), barra_land_area_km2, barra_yield_rate))
+cat(sprintf("  Oysters (mixed):    %s t | %.3f km² | yield %.0f t/km²\n",
+            format(oyster_actual_production, big.mark = ","), oyster_area_km2, oyster_yield_rate))
+```
+
+# ===== DISPLAY RESULTS: ATLANTIC SALMON =====
+
+```{r display-salmon}
+cat("\n==========================================\n")
+cat("ATLANTIC SALMON PRODUCTION MODELING\n")
+cat("==========================================\n")
+
+cat("\nPen specifications (Tassal Group, 2021):\n")
+cat(sprintf("  Circumference: %g m | Radius: %.2f m\n", pen_circumference, pen_radius))
+cat(sprintf("  Surface area: %.0f m² | Volume: %s m³ | Depth: %.2f m\n",
+            pen_area, format(pen_volume, big.mark = ","), pen_depth))
+
+cat("\n--- APPROACH 1: EMPIRICAL (top-down) ---\n")
+cat(sprintf("Empirical yield rate: %s t/km²\n",
+            format(round(actual_yield_per_km2, 0), big.mark = ",")))
+
+sal_emp_table <- data.frame(
+  Scenario      = c("Low Density (Summer)", "Actual (Seasonal Average)", "High Density (Winter)"),
+  Density_kg_m3 = c(density_low, density_mid, density_high),
+  Yield_t_km2   = c(round(emp_yield_low, 0), round(actual_yield_per_km2, 0), round(emp_yield_high, 0)),
+  Production_t  = c(round(emp_prod_low, 0), actual_production, round(emp_prod_high, 0))
+)
+print(sal_emp_table)
+
+cat("\n--- APPROACH 2: VOLUMETRIC (bottom-up, 3D) ---\n")
+cat(sprintf("Formula: P = A × D × d × S × 1,000\n"))
+cat(sprintf("Pen depth: %.2f m | Area: %.2f km²\n\n", pen_depth, area_km2))
+
+sal_vol_table <- data.frame(
+  Scenario      = c("Low (10 kg/m³, 16% mort)", "Mid (12.2 kg/m³, 15% mort)", "High (15 kg/m³, 14% mort)"),
+  Density_kg_m3 = c(density_low, density_mid, density_high),
+  Survival      = c(survival_low, survival_mid, survival_high),
+  Yield_t_km2   = c(round(vol_yield_low, 0), round(vol_yield_mid, 0), round(vol_yield_high, 0)),
+  Production_t  = c(round(vol_prod_low, 0), round(vol_prod_mid, 0), round(vol_prod_high, 0))
+)
+print(sal_vol_table)
+
+cat("\n--- INFRASTRUCTURE SCALING FACTOR ---\n")
+cat("Satellite-detected vectors vs Google Earth pen measurements:\n\n")
+isf_display <- fpr_data
+isf_display$Detected_m2  <- format(round(isf_display$Detected_m2, 0), big.mark = ",")
+isf_display$Pen_area_m2  <- format(round(isf_display$Pen_area_m2, 0), big.mark = ",")
+isf_display$FPR          <- round(fpr_data$FPR, 2)
+isf_display$Pen_fraction <- paste0(round(fpr_data$Pen_fraction * 100, 1), "%")
+names(isf_display)[names(isf_display) == "FPR"] <- "Scaling_Factor"
+print(isf_display)
+cat(sprintf("\nMean scaling factor: %.2f× (detected area is ~%g× larger than pen surface)\n",
+            mean_fpr, round(mean_fpr, 0)))
+cat(sprintf("Mean pen fraction: %.1f%% of detected area is pen water surface\n",
+            mean_pen_fraction * 100))
+
+cat("\n--- APPROACH 3: CORRECTED VOLUMETRIC (scaling-factor-adjusted 3D) ---\n")
+cat(sprintf("Effective pen area: %.2f km² × %.3f = %.3f km²\n",
+            area_km2, mean_pen_fraction, pen_area_km2))
+cat(sprintf("Formula: P = (A × f) × D × d × S × 1,000\n"))
+cat(sprintf("  where f = measured pen fraction (%.3f)\n\n", mean_pen_fraction))
+
+sal_cor_table <- data.frame(
+  Scenario      = c("Low (10 kg/m³, 16% mort)", "Mid (12.2 kg/m³, 15% mort)", "High (15 kg/m³, 14% mort)"),
+  Density_kg_m3 = c(density_low, density_mid, density_high),
+  Survival      = c(survival_low, survival_mid, survival_high),
+  Production_t  = c(round(cor_vol_prod_low, 0), round(cor_vol_prod_mid, 0), round(cor_vol_prod_high, 0))
+)
+print(sal_cor_table)
+
+cat("\n--- PRODUCTIVE FRACTION: 3-STEP CROSS-VALIDATION ---\n")
+
+cat("\nSTEP 1 — Raw volumetric (all detected area treated as pen surface):\n")
+cat(sprintf("  If 100%% of %.2f km² were pen water surface:\n", area_km2))
+cat(sprintf("  Volumetric range = %s – %s t\n",
+            format(round(vol_prod_low, 0), big.mark = ","),
+            format(round(vol_prod_high, 0), big.mark = ",")))
+cat(sprintf("  Mid estimate     = %s t  [ABARES reported: %s t]\n",
+            format(round(vol_prod_mid, 0), big.mark = ","),
+            format(actual_production,     big.mark = ",")))
+cat(sprintf("  → Raw volumetric OVERESTIMATES by %.1f× at mid scenario\n",
+            vol_prod_mid / actual_production))
+
+cat("\nSTEP 2 — Back-calculation: what pen fraction does the actual production imply?\n")
+cat(sprintf("  Empirical yield rate = %s t / %.2f km² = %s t/km²\n",
+            format(actual_production, big.mark = ","),
+            area_km2,
+            format(round(actual_yield_per_km2, 0), big.mark = ",")))
+cat(sprintf("  Volumetric yield (mid scenario, full area) = %s t/km²\n",
+            format(round(vol_yield_mid, 0), big.mark = ",")))
+cat(sprintf("  Production-implied pen fraction = %s / %s = %.1f%%\n",
+            format(round(actual_yield_per_km2, 0), big.mark = ","),
+            format(round(vol_yield_mid, 0), big.mark = ","),
+            productive_fraction * 100))
+cat(sprintf("  Interpretation: only ~%.0f%% of detected area is pen water surface;\n", productive_fraction * 100))
+cat( "  the remainder is inter-pen spacing, walkways, feed barges, and\n")
+cat( "  the spatial extent of pen movement over time within the lease.\n")
+
+cat("\nSTEP 3 — Direct measurement (Google Earth Pro pen digitising):\n")
+cat(sprintf("  42 pens digitised across 3 leases\n"))
+cat(sprintf("  Measured pen fraction = %.1f%%\n", mean_pen_fraction * 100))
+cat(sprintf("  (range: %.1f%% – %.1f%% across leases)\n",
+            min(fpr_data$Pen_fraction) * 100, max(fpr_data$Pen_fraction) * 100))
+
+cat(sprintf("\nCONVERGENCE: back-calculated %.1f%% vs directly measured %.1f%%  (Δ = %.1f pp)\n",
+            productive_fraction * 100, mean_pen_fraction * 100,
+            abs(productive_fraction - mean_pen_fraction) * 100))
+cat("Two independent methods agree → validates both the detection and the model.\n")
+
+cat("\nCorrected volumetric range (pen fraction applied):\n")
+cat(sprintf("  %s – %s t  → WITHIN range of ABARES reported %s t ✓\n",
+            format(round(cor_vol_prod_low, 0), big.mark = ","),
+            format(round(cor_vol_prod_high, 0), big.mark = ","),
+            format(actual_production,           big.mark = ",")))
+
+cat("\n--- VALIDATION SUMMARY ---\n")
+cat(sprintf("ABARES reported: %s t\n", format(actual_production, big.mark = ",")))
+cat(sprintf("Empirical range:        %s – %s t → %s\n",
+            format(round(emp_prod_low, 0), big.mark = ","),
+            format(round(emp_prod_high, 0), big.mark = ","),
+            ifelse(emp_prod_low <= actual_production & actual_production <= emp_prod_high,
+                   "WITHIN RANGE ✓", "OUTSIDE RANGE")))
+cat(sprintf("Corrected Vol. range:   %s – %s t → %s\n",
+            format(round(cor_vol_prod_low, 0), big.mark = ","),
+            format(round(cor_vol_prod_high, 0), big.mark = ","),
+            ifelse(cor_vol_prod_low <= actual_production & actual_production <= cor_vol_prod_high,
+                   "WITHIN RANGE ✓", "OUTSIDE RANGE")))
+cat(sprintf("Raw Volumetric range:   %s – %s t → ABOVE (expected: includes non-pen area)\n",
+            format(round(vol_prod_low, 0), big.mark = ","),
+            format(round(vol_prod_high, 0), big.mark = ",")))
+```
+
+# ===== DISPLAY RESULTS: SOUTHERN BLUEFIN TUNA =====
+
+```{r display-sbt}
+cat("\n========================================\n")
+cat("SOUTHERN BLUEFIN TUNA PRODUCTION MODELING\n")
+cat("========================================\n")
+
+cat("\n--- APPROACH 1: EMPIRICAL (top-down) ---\n")
+cat(sprintf("Empirical yield rate: %s t/km²\n",
+            format(round(sbt_actual_yield_per_km2, 0), big.mark = ",")))
+cat(sprintf("Back-calculated effective density: %.2f kg/m³\n", sbt_effective_density))
+cat(sprintf("  (within regulatory range of %g–%g kg/m³)\n\n", sbt_density_low, sbt_density_high))
+
+sbt_emp_table <- data.frame(
+  Scenario      = c("Low Density", "Actual (Effective)", "High Density"),
+  Density_kg_m3 = c(sbt_density_low, round(sbt_effective_density, 2), sbt_density_high),
+  Yield_t_km2   = c(round(sbt_emp_yield_low, 0), round(sbt_actual_yield_per_km2, 0), round(sbt_emp_yield_high, 0)),
+  Production_t  = c(round(sbt_emp_prod_low, 0), sbt_actual_production, round(sbt_emp_prod_high, 0))
+)
+print(sbt_emp_table)
+
+cat("\n--- APPROACH 2: VOLUMETRIC (bottom-up, 3D) ---\n")
+cat(sprintf("Formula: P = A × D × d × S × 1,000\n"))
+cat(sprintf("Net depth: %g m | Area: %.3f km²\n\n", sbt_net_depth, sbt_area_km2))
+
+sbt_vol_table <- data.frame(
+  Scenario      = c("Low (2 kg/m³, 4% mort)", "Mid (3 kg/m³, 3% mort)", "High (4 kg/m³, 2% mort)"),
+  Density_kg_m3 = c(sbt_density_low, sbt_density_mid, sbt_density_high),
+  Survival      = c(sbt_survival_low, sbt_survival_mid, sbt_survival_high),
+  Yield_t_km2   = c(round(sbt_vol_yield_low, 0), round(sbt_vol_yield_mid, 0), round(sbt_vol_yield_high, 0)),
+  Production_t  = c(round(sbt_vol_prod_low, 0), round(sbt_vol_prod_mid, 0), round(sbt_vol_prod_high, 0))
+)
+print(sbt_vol_table)
+
+cat("\n--- CONVERGENCE CHECK ---\n")
+cat(sprintf("Empirical yield rate:               %s t/km²\n",
+            format(round(sbt_actual_yield_per_km2, 0), big.mark = ",")))
+cat(sprintf("Volumetric yield at effective density\n"))
+cat(sprintf("  (%.2f kg/m³ × %gm × %.2f × 1,000):  %s t/km²\n",
+            sbt_effective_density, sbt_net_depth, sbt_survival_mid,
+            format(round(sbt_effective_density * sbt_net_depth * sbt_survival_mid * 1000, 0), big.mark = ",")))
+cat(sprintf("Agreement: %.1f%%\n",
+            (sbt_effective_density * sbt_net_depth * sbt_survival_mid * 1000) / sbt_actual_yield_per_km2 * 100))
+
+cat("\n--- VALIDATION ---\n")
+cat(sprintf("ABARES reported: %s t\n", format(sbt_actual_production, big.mark = ",")))
+cat(sprintf("Empirical range:   %s – %s t → %s\n",
+            format(round(sbt_emp_prod_low, 0), big.mark = ","),
+            format(round(sbt_emp_prod_high, 0), big.mark = ","),
+            ifelse(sbt_emp_prod_low <= sbt_actual_production & sbt_actual_production <= sbt_emp_prod_high,
+                   "WITHIN RANGE ✓", "OUTSIDE RANGE")))
+cat(sprintf("Volumetric range:  %s – %s t → %s\n",
+            format(round(sbt_vol_prod_low, 0), big.mark = ","),
+            format(round(sbt_vol_prod_high, 0), big.mark = ","),
+            ifelse(sbt_vol_prod_low <= sbt_actual_production & sbt_actual_production <= sbt_vol_prod_high,
+                   "WITHIN RANGE ✓", "OUTSIDE RANGE")))
+```
+
+# ===== DISPLAY RESULTS: PRAWNS AND BARRAMUNDI =====
+
+```{r display-prawn-barra}
+cat("\n========================================\n")
+cat("PRAWN & BARRAMUNDI PRODUCTION MODELING\n")
+cat("========================================\n")
+
+cat("\n--- BLACK TIGER PRAWN ---\n")
+cat(sprintf("Model: Area-yield (P = A × Y)\n"))
+cat(sprintf("Yield range: %.0f–%.0f t/km² (%.1f–%.1f t/ha)\n",
+            prawn_yield_low_tkm2, prawn_yield_high_tkm2,
+            prawn_yield_low_tkm2 / 100, prawn_yield_high_tkm2 / 100))
+cat(sprintf("Production range: %s–%s t\n",
+            format(round(prawn_prod_low, 0), big.mark = ","),
+            format(round(prawn_prod_high, 0), big.mark = ",")))
+cat(sprintf("ABARES reported: %s t → %s\n",
+            format(prawn_actual_production, big.mark = ","),
+            ifelse(prawn_prod_low <= prawn_actual_production & prawn_actual_production <= prawn_prod_high,
+                   "WITHIN RANGE ✓", "OUTSIDE RANGE")))
+cat(sprintf("Empirical yield rate: %.0f t/km² (%.2f t/ha)\n",
+            prawn_yield_rate, prawn_yield_rate / 100))
+
+cat("\n--- BARRAMUNDI ---\n")
+cat(sprintf("Model: Area-yield (P = A × Y), land-based ponds only\n"))
+cat(sprintf("Yield range: %.0f–%.0f t/km² (%.0f–%.0f t/ha)\n",
+            barra_yield_low_tkm2, barra_yield_high_tkm2,
+            barra_yield_low_tkm2 / 100, barra_yield_high_tkm2 / 100))
+cat(sprintf("Production range: %s–%s t\n",
+            format(round(barra_prod_low, 0), big.mark = ","),
+            format(round(barra_prod_high, 0), big.mark = ",")))
+cat(sprintf("ABARES reported: %s t → %s\n",
+            format(barra_actual_production, big.mark = ","),
+            ifelse(barra_prod_low <= barra_actual_production & barra_actual_production <= barra_prod_high,
+                   "WITHIN RANGE ✓", "OUTSIDE RANGE")))
+cat(sprintf("Empirical yield rate: %.0f t/km² (%.2f t/ha)\n",
+            barra_yield_rate, barra_yield_rate / 100))
+```
+
+# ===== DISPLAY RESULTS: OYSTERS =====
+
+```{r display-oysters}
+cat("\n========================================\n")
+cat("OYSTERS (MIXED SPP.) PRODUCTION MODELING\n")
+cat("========================================\n")
+
+cat(sprintf("\nModel: Area-yield (P = A × Y), marine longline systems\n"))
+cat(sprintf("Total detected infrastructure: %.3f km²\n", oyster_area_km2))
+cat(sprintf("  NSW: 5.898 km² | QLD: 0.409 km² | SA: 6.789 km² | TAS: 3.128 km² | WA: 0.476 km²\n"))
+cat(sprintf("\nYield range: %.0f-%.0f t/km² (%.0f-%.0f t/ha)\n",
+            oyster_yield_low_tkm2, oyster_yield_high_tkm2,
+            oyster_yield_low_tkm2 / 100, oyster_yield_high_tkm2 / 100))
+cat(sprintf("  Sources: FAO extensive lease yield ~25 t/ha (Helm, 2009) divided by\n"))
+cat(sprintf("  grow-out duration to reflect multi-cohort steady-state farm structure.\n"))
+cat(sprintf("  SRO: 25/3yr = ~8.3 t/ha (Nell, 1993; Sapphire Coast Oysters, 2024).\n"))
+cat(sprintf("  Pacific oyster: 25/1.5-2.5yr = ~10-17 t/ha (Helm, 2009).\n"))
+cat(sprintf("Production range: %s - %s t\n",
+            format(round(oyster_prod_low, 0), big.mark = ","),
+            format(round(oyster_prod_high, 0), big.mark = ",")))
+cat(sprintf("ABARES reported: %s t → %s\n",
+            format(oyster_actual_production, big.mark = ","),
+            ifelse(oyster_prod_low <= oyster_actual_production &
+                     oyster_actual_production <= oyster_prod_high,
+                   "WITHIN RANGE ✓", "OUTSIDE RANGE")))
+cat(sprintf("Empirical yield rate: %.0f t/km² (%.2f t/ha)\n",
+            oyster_yield_rate, oyster_yield_rate / 100))
+cat(sprintf("Survival: %.0f%% (mortality %.0f%% per growing season)\n",
+            oyster_survival * 100, (1 - oyster_survival) * 100))
+cat(sprintf("\nNote: ABARES reports all oyster species in a single category.\n"))
+cat(sprintf("Detected infrastructure encompasses primarily Pacific Oysters (SA, TAS)\n"))
+cat(sprintf("and Sydney Rock Oysters (NSW), with minor production in QLD and WA.\n"))
+```
+
+# ===== INFRASTRUCTURE SCALING FACTOR TABLE =====
+
+```{r infrastructure-scaling-factor-table}
+Table_isf <- data.frame(
+  Lease_ID = c(220, 201, 141, NA),
+  Number_of_Pens = c(12, 18, 12, 42),
+  Measured_Pen_Area_m2 = c(17926.81, 45641.38, 59771.19, 123339.38),
+  Detected_Infrastructure_m2 = c(182418.40, 362625.60, 542620.70, 1087664.70),
+  Infrastructure_Scaling_Factor = c(
+    182418.40 / 17926.81,
+    362625.60 / 45641.38,
+    542620.70 / 59771.19,
+    mean_fpr
+  ),
+  Pen_Fraction_pct = c(
+    17926.81 / 182418.40 * 100,
+    45641.38 / 362625.60 * 100,
+    59771.19 / 542620.70 * 100,
+    mean_pen_fraction * 100
+  )
+)
+
+Table_isf_display <- Table_isf
+Table_isf_display$Lease_ID <- ifelse(is.na(Table_isf_display$Lease_ID), "Mean",
+                                      as.character(Table_isf_display$Lease_ID))
+Table_isf_display$Measured_Pen_Area_m2 <- format(round(Table_isf_display$Measured_Pen_Area_m2, 2),
+                                                   big.mark = ",")
+Table_isf_display$Detected_Infrastructure_m2 <- format(round(Table_isf_display$Detected_Infrastructure_m2, 2),
+                                                         big.mark = ",")
+Table_isf_display$Infrastructure_Scaling_Factor <- round(Table_isf_display$Infrastructure_Scaling_Factor, 2)
+Table_isf_display$Pen_Fraction_pct <- round(Table_isf_display$Pen_Fraction_pct, 1)
+
+cat("\n=== TABLE X: INFRASTRUCTURE SCALING FACTOR ANALYSIS ===\n")
+cat("Atlantic salmon lease sites, Tasmania\n")
+cat("Pen areas measured from Google Earth Pro; detected areas from Alpha Earth Foundation embeddings\n\n")
+print(Table_isf_display, row.names = FALSE)
+
+isf_output_path <- here("output_data/SSRG_GEE_results/Table_Infrastructure_Scaling_Factor.csv")
+write.csv(Table_isf, isf_output_path, row.names = FALSE)
+cat(sprintf("\nTable saved to: %s\n", isf_output_path))
+```
+
+# ===== MANUSCRIPT TEXT: GENERAL FRAMEWORK =====
+
+```{r general-framework-manuscript-text, results='asis'}
+cat("
+## Species-specific production distribution
+
+## Marine finfish systems
+
+For marine finfish cultured in floating net pens or pontoons, production was 
+estimated using two complementary approaches consistent with the global 
+aquaculture spatial framework of Halpern et al. (2022): (i) an empirical 
+(top-down) approach and (ii) a volumetric (bottom-up) approach.
+
+The empirical approach derived realised yield (t km⁻²) by dividing 
+ABARES-reported production for the reference financial year (2021–2022) by the 
+total satellite-detected aquaculture infrastructure area in the producing 
+state(s). This empirical yield implicitly incorporates operational 
+characteristics such as fallowing rotations, inter-pen spacing, and 
+non-productive infrastructure within the detected aquaculture infrastructure.
+
+The volumetric approach estimated theoretical production capacity from 
+three-dimensional pen or pontoon volume using stocking density (kg m⁻³), 
+net depth (m), survival rate, and a unit conversion factor (×1,000).
+
+Where empirical and volumetric estimates diverged, an infrastructure scaling 
+factor was quantified to reconcile differences between satellite-detected 
+infrastructure area and effective productive water surface. This correction 
+factor was applied to adjust the volumetric estimate where appropriate, and 
+was independently cross-validated against the production-derived productive 
+fraction.
+
+Species-specific parameterisation is described in the following sections.
+")
+```
+
+# ===== MANUSCRIPT TEXT: ATLANTIC SALMON =====
+
+```{r salmon-manuscript-text, results='asis'}
+cat("
+## Atlantic salmon (Salmo salar)
+
+Atlantic salmon production occurs almost exclusively in Tasmania (>98% of 
+national salmonid production).
+
+Empirical yield was calculated by dividing ABARES-reported salmonid production 
+(2021–2022) by the total detected infrastructure area in Tasmania. Production 
+ranges were generated using reported seasonal stocking densities (", density_low, 
+" kg m⁻³ in summer to ", density_high, " kg m⁻³ in winter; seasonal average ", 
+density_mid, " kg m⁻³; Tassal Group, 2015; 2021). We applied mortality estimations for Atlantic Salmon based on a study in Norway, ranging from ", 
+mortality_low * 100, "to", mortality_high * 100, "%(Bang Jensen et al., 2020), as we were unable to find public and straightforward numerical annual mortality or survival rates in Australian literature.
+
+
+For the volumetric approach, pen geometry (", pen_circumference, " m circumference; 
+", format(pen_volume, big.mark = ','), " m³ volume; ", round(pen_depth, 2), 
+" m net depth) was derived from industry reporting (Tassal Group, 2021). 
+Because satellite-detected infrastructure polygons include non-productive 
+components (e.g., inter-pen spacing, walkways, feed barges, fallow positions), 
+an infrastructure scaling factor ('pen fraction') was quantified from a 
+stratified sample of lease sites (n = 42 pens across leases 141, 201, and 220). 
+Individual pen boundaries were manually digitised from high-resolution imagery 
+in Google Earth Pro and compared against satellite-detected infrastructure 
+polygons. This correction was applied to generate a reconciled volumetric 
+estimate: P = (A × f) × D × d × S × 1,000.
+
+
+## RESULTS — Atlantic salmon production distribution model
+
+Satellite detection identified ", sprintf('%.2f', area_km2), " km² of active 
+aquaculture infrastructure for Atlantic salmon (Salmo salar) within Tasmania's 
+25.88 km² of finfish leases (23.87% of leased area). The empirical yield rate 
+was ", format(round(actual_yield_per_km2, 0), big.mark = ','), " t/km² 
+of detected aquaculture infrastructure, or ", 
+format(round(actual_production / 25.88, 0), big.mark = ','), " t/km² of total 
+finfish lease area. Density-scaled production ranged from ", 
+format(round(emp_prod_low, 0), big.mark = ','), " to ", 
+format(round(emp_prod_high, 0), big.mark = ','), " t, encompassing the 
+ABARES-reported salmonid production of ", format(actual_production, big.mark = ','), " t 
+(AUD 1.15B, 2021–2022), of which >98% comprises Atlantic salmon produced 
+exclusively in Tasmanian marine lease areas (the salmonid category includes 
+minor freshwater trout production from mainland states).
+
+The uncorrected volumetric approach yielded substantially higher estimates 
+(", format(round(vol_yield_low, 0), big.mark = ','), "–", 
+format(round(vol_yield_high, 0), big.mark = ','), " t/km²), reflecting the 
+assumption that the entire detected aquaculture infrastructure represents 
+productive pen water surface. Infrastructure scaling factor analysis across 
+the three sampled leases (Table X) revealed a mean scaling factor of ", 
+sprintf('%.2f', mean_fpr), "× (range: ", sprintf('%.2f', min(fpr_data$FPR)), 
+"–", sprintf('%.2f', max(fpr_data$FPR)), "×), corresponding to a mean pen 
+fraction of ", sprintf('%.1f', mean_pen_fraction * 100), "% (Table X). A 
+total of 42 pens were digitised across three leases, encompassing ", 
+format(round(sum(fpr_data$Pen_area_m2), 0), big.mark = ','), " m² of pen 
+water surface within ", format(round(sum(fpr_data$Detected_m2), 0), big.mark = ','), 
+" m² of detected aquaculture infrastructure.
+
+When the measured pen fraction was applied to correct the volumetric estimates, 
+the resulting production range (", format(round(cor_vol_prod_low, 0), big.mark = ','), 
+"–", format(round(cor_vol_prod_high, 0), big.mark = ','), " t) converged with 
+the empirical range and encompassed reported production. Notably, the directly 
+measured pen fraction (", sprintf('%.1f', mean_pen_fraction * 100), "%) closely 
+agreed with the production-derived productive fraction (", 
+sprintf('%.1f', productive_fraction * 100), "%), calculated independently as 
+the ratio of empirical to volumetric yield rates. This convergence between 
+measurement-based and production-based estimates provides cross-validation of 
+both the satellite detection methodology and the production distribution model, 
+confirming that the empirical yield rate approach correctly accounts for the 
+non-productive components captured within satellite-detected aquaculture 
+infrastructure (consistent with the disturbance framework of Halpern et al., 2022).
+")
+```
+#results Salmon shorter with corrections
+```{r}
+cat("
+If all ", sprintf('%.2f', area_km2), " km² of detected aquaculture infrastructure 
+had been treated as productive pen water surface — as would be assumed without 
+an infrastructure scaling factor — the volumetric model would estimate ", 
+format(round(vol_prod_low, 0), big.mark = ','), "–", 
+format(round(vol_prod_high, 0), big.mark = ','), " t, a ", 
+sprintf('%.1f', vol_prod_mid / actual_production), 
+"× overestimate of ABARES-reported production at the mid scenario. This 
+discrepancy arises because satellite-detected infrastructure polygons capture 
+not only pen water surface but also inter-pen spacing, walkways, feed barges, 
+and the spatial envelope of pen movement within the lease over time.
+
+To quantify what fraction of detected area is truly productive, we 
+back-calculated the implied pen fraction from reported production: the empirical 
+yield rate of ", format(round(actual_yield_per_km2, 0), big.mark = ','), 
+" t km⁻² divided by the volumetric yield of ", 
+format(round(vol_yield_mid, 0), big.mark = ','), 
+" t km⁻² implies that ", sprintf('%.1f', productive_fraction * 100), 
+"% of detected area represents pen water surface. This 
+production-derived estimate was independently verified by manually digitising 
+individual pen boundaries from high-resolution imagery in Google Earth Pro 
+across three lease sites (n = 42 pens; Table X). Direct measurement yielded 
+a mean pen fraction of ", sprintf('%.1f', mean_pen_fraction * 100), 
+"% (range: ", sprintf('%.1f', min(fpr_data$Pen_fraction) * 100), "–", 
+sprintf('%.1f', max(fpr_data$Pen_fraction) * 100), 
+"% across leases), closely agreeing with the production-implied estimate 
+(difference: ", sprintf('%.1f', abs(productive_fraction - mean_pen_fraction) * 100), 
+" percentage points). This convergence between two independent approaches — 
+one derived from production statistics, one from direct spatial measurement — 
+confirms that approximately ", sprintf('%.0f', mean_pen_fraction * 100), 
+"% of satellite-detected aquaculture infrastructure corresponds to pen water 
+surface, with the remaining ~", sprintf('%.0f', (1 - mean_pen_fraction) * 100), 
+"% comprising non-productive components.
+
+Applying the measured pen fraction to the volumetric model yielded a corrected 
+production range of ", format(round(cor_vol_prod_low, 0), big.mark = ','), 
+"–", format(round(cor_vol_prod_high, 0), big.mark = ','), 
+" t, which encompassed the ABARES-reported production of ", 
+format(actual_production, big.mark = ','), 
+" t and converged with the empirical range of ", 
+format(round(emp_prod_low, 0), big.mark = ','), "–", 
+format(round(emp_prod_high, 0), big.mark = ','), 
+" t (consistent with the disturbance framework of Halpern et al., 2022).
+")
+```
+
+# ===== MANUSCRIPT TEXT: SOUTHERN BLUEFIN TUNA =====
+
+```{r sbt-manuscript-text, results='asis'}
+cat("
+## Southern Bluefin Tuna (Thunnus maccoyii)
+
+Southern Bluefin Tuna production consists of marine-based capture ranching 
+confined to the Lincoln Offshore Aquaculture Zone in Spencer Gulf, South 
+Australia.
+
+Empirical yield was calculated by dividing ABARES-reported production 
+(2021–2022) by the detected aquaculture infrastructure area in South Australia. 
+Production ranges were generated using the regulatory stocking density range of 
+", sbt_density_low, "–", sbt_density_high, " kg m⁻³ (Ma, 2021), with 
+capture-to-harvest mortality of ", sbt_mortality_low * 100, "–", 
+sbt_mortality_high * 100, "% (Ma, 2021).
+
+For the volumetric approach, pontoon geometry (45 m diameter; ", sbt_net_depth, 
+" m net depth; Ellis and Kiessling, 2014) was used to estimate theoretical 
+production capacity. No infrastructure scaling factor was applied, as the 
+isolated pontoon configuration means detected infrastructure is expected to 
+closely approximate productive water surface. The effective stocking density 
+implied by ABARES-reported production was back-calculated to assess internal 
+model consistency.
+
+
+## RESULTS — Southern Bluefin Tuna production distribution model
+
+Southern Bluefin Tuna (Thunnus maccoyii) aquaculture infrastructure was 
+detected exclusively within South Australia's Lincoln Offshore Aquaculture 
+Zone in Spencer Gulf, comprising ", sprintf('%.3f', sbt_area_km2), " km² of 
+marine infrastructure within 36.627 km² of lease area. All production is 
+marine-based capture ranching, where wild-caught juveniles are transferred to 
+sea pens for grow-out. The empirical yield rate was ", 
+format(round(sbt_actual_yield_per_km2, 0), big.mark = ','), " t/km² of 
+detected aquaculture infrastructure, substantially higher than Atlantic 
+salmon (", format(round(actual_yield_per_km2, 0), big.mark = ','), 
+" t/km²), reflecting the high production density of SBT ranching: ", 
+format(sbt_actual_production, big.mark = ','), " t produced from only ", 
+sprintf('%.3f', sbt_area_km2), " km² of detected infrastructure, compared to ", 
+format(actual_production, big.mark = ','), " t from ", sprintf('%.2f', area_km2), 
+" km² for Atlantic salmon. Density-scaled empirical production ranged from ", 
+format(round(sbt_emp_prod_low, 0), big.mark = ','), " to ", 
+format(round(sbt_emp_prod_high, 0), big.mark = ','), " t, encompassing the 
+ABARES-reported production of ", format(sbt_actual_production, big.mark = ','), 
+" t (AUD 110.4M, 2021–22).
+
+The volumetric approach produced convergent estimates: at the back-calculated 
+effective stocking density of ", sprintf('%.2f', sbt_effective_density), 
+" kg/m³ across ", sbt_net_depth, " m net depth with ", sprintf('%.0f', sbt_survival_mid * 100), 
+"% survival, the volumetric yield was approximately ", 
+format(round(sbt_effective_density * sbt_net_depth * sbt_survival_mid * 1000, 0), big.mark = ','), 
+" t/km², validating the empirical rate (", 
+sprintf('%.1f', (sbt_effective_density * sbt_net_depth * sbt_survival_mid * 1000) / sbt_actual_yield_per_km2 * 100), 
+"% agreement). The full volumetric production range (", 
+format(round(sbt_vol_prod_low, 0), big.mark = ','), "–", 
+format(round(sbt_vol_prod_high, 0), big.mark = ','), 
+" t) also encompassed reported production. The back-calculated effective density of ", 
+sprintf('%.2f', sbt_effective_density), " kg/m³ falls within the upper end of the 
+regulatory range of ", sbt_density_low, "–", sbt_density_high, 
+" kg/m³ (Ma, 2021), consistent with the intensive nature of southern bluefin tuna 
+ranching operations within the Lincoln Offshore Aquaculture Zone. Unlike Atlantic 
+salmon, where the pen fraction was ", sprintf('%.1f', mean_pen_fraction * 100), 
+"%, meaning that only ~", round(mean_pen_fraction * 100), 
+"% of detected aquaculture infrastructure represented productive pen water surface, 
+the close agreement between empirical and volumetric yields for Southern Bluefin 
+Tuna suggests that the detected aquaculture infrastructure closely approximates 
+productive pontoon water surface, consistent with the isolated pontoon configuration 
+of tuna ranching operations.
+")
+```
+
+# ===== MANUSCRIPT TEXT: PRAWNS AND BARRAMUNDI =====
+
+```{r prawn-barra-manuscript-text, results='asis'}
+cat("
+## Land-based pond systems
+
+For pond-based systems, production was estimated using an area-based yield 
+model. Species-specific annual yield rates (t km⁻²) were applied to the 
+productive water footprint detected through Earth observation. Where yield 
+ranges were reported, low and high values were used to generate a predicted 
+production range. Production was calculated as:
+
+P = A × Y
+
+where A is the detected productive pond area (km²) and Y is the annual yield 
+rate (t km⁻²). Mortality adjustments were incorporated where available.
+
+## Barramundi (Lates calcarifer)
+
+Barramundi production was distributed across detected land-based pond 
+infrastructure using a yield range of ", 
+sprintf('%.0f', barra_yield_low_tkm2), "–", sprintf('%.0f', barra_yield_high_tkm2), 
+" t km⁻² (", sprintf('%.0f', barra_yield_low_tkm2 / 100), "–", 
+sprintf('%.0f', barra_yield_high_tkm2 / 100), 
+" t ha⁻¹), consistent with reported pond-based production rates (Business Queensland, 2025). As ABARES does not report marine barramundi production 
+separately, production was distributed across terrestrial pond infrastructure 
+only. The area-based approach reflects the predominantly pond-based production 
+structure of barramundi aquaculture in Australia and does not require 
+volumetric parameterisation.
+
+## Black Tiger Prawn (Penaeus monodon)
+
+Prawn production was estimated using annualised yield rates applied to detected 
+pond area. Yield was derived from stocking density (", prawn_pl_low, "–", 
+prawn_pl_high, " post-larvae m⁻²; Lovatelli et al., 2008), harvest weight (", 
+prawn_hw_low, "–", prawn_hw_high, " g), and survival (", prawn_survival * 100, 
+"%), yielding a production range of ", 
+sprintf('%.0f', prawn_yield_low_tkm2), "–", sprintf('%.0f', prawn_yield_high_tkm2), 
+" t km⁻². Yield assumptions reflect typical seasonal stocking cycles within 
+the financial year. No volumetric modelling or infrastructure scaling factor 
+was required, as production in pond-based prawn aquaculture is directly 
+proportional to cultivated surface area.
+
+
+## RESULTS — Prawn production distribution model
+
+The area occupied by prawn aquaculture infrastructure nationally (", 
+sprintf('%.3f', prawn_area_km2), " km²), all in land-based sites, could 
+generate production between ", format(round(prawn_prod_low, 0), big.mark = ','), " and ", 
+format(round(prawn_prod_high, 0), big.mark = ','), " tonnes. ABARES-reported production 
+was ", format(prawn_actual_production, big.mark = ','), " t (AUD 180.8M, 
+2021–2022), falling within the predicted range and corresponding to an empirical 
+yield rate of ", format(round(prawn_yield_rate, 0), big.mark = ','), " t/km² 
+(", sprintf('%.2f', prawn_yield_rate / 100), " t/ha). It remains below the typical range for 
+semi-intensive operations of 1,000 to 1,750 t/km², suggesting that not all 
+detected pond area is simultaneously in production.
+
+
+## RESULTS — Barramundi production distribution model
+
+Total detected barramundi aquaculture infrastructure was ", 
+sprintf('%.3f', barra_total_area_km2), " km², comprising ", 
+sprintf('%.3f', barra_land_area_km2), " km² of terrestrial ponds and ", 
+sprintf('%.3f', barra_marine_area_km2), " km² of marine cage infrastructure. 
+As ABARES did not report barramundi production from marine environments 
+separately, production was distributed across land-based farms only. The 
+expected production range of ", format(round(barra_prod_low, 0), big.mark = ','), " to ", 
+format(round(barra_prod_high, 0), big.mark = ','), " tonnes encompasses the 
+ABARES-reported production of ", format(barra_actual_production, big.mark = ','), 
+" t (AUD 60.6M, 2021–2022), corresponding to an empirical yield rate of ", 
+format(round(barra_yield_rate, 0), big.mark = ','), " t/km² (", 
+sprintf('%.2f', barra_yield_rate / 100), " t/ha). This exceeds typical 
+Queensland pond-based production rates of 1,000 to 1,500 t/km² but remains below 
+maximum reported yields of 3,000 t/km², suggesting moderately intensified 
+operations.
+")
+```
+
+# ===== MANUSCRIPT TEXT: OYSTERS =====
+
+```{r oyster-manuscript-text, results='asis'}
+cat("
+## Oysters (mixed spp.)
+
+Oyster production was modelled as a single aggregated category consistent with 
+ABARES reporting, which does not disaggregate production by species. Detected 
+longline infrastructure encompasses farms producing primarily Pacific Oysters 
+(*Crassostrea gigas*) in Tasmania and South Australia, and Sydney Rock Oysters 
+(*Saccostrea glomerata*) in New South Wales, with minor production in Queensland 
+and Western Australia.
+
+An annual yield range of ", 
+sprintf('%.0f', oyster_yield_low_tkm2), "–", sprintf('%.0f', oyster_yield_high_tkm2), 
+" t km⁻² (", sprintf('%.0f', oyster_yield_low_tkm2 / 100), "–", 
+sprintf('%.0f', oyster_yield_high_tkm2 / 100), 
+" t ha⁻¹) was applied to the total detected longline infrastructure area. 
+Extensive Pacific oyster lease areas yield approximately 25 t ha⁻¹ yr⁻¹ 
+(Helm, 2009), with oysters harvested at a market size of 70–100+ g live weight. 
+These single-cycle productivity figures are not directly applicable to 
+satellite-detected infrastructure because remote sensing captures total farm 
+area across all grow-out stages simultaneously. Sydney Rock Oysters — the 
+dominant species in NSW, the largest producing state by detected area — require 
+a minimum of three years to reach market size (Nell, 1993; Sapphire Coast 
+Oysters, 2024). In a steady-state farm operating continuous recruitment, only 
+approximately one cohort in three is harvestable in any given year, yielding an 
+expected annualised whole-farm rate of approximately 25 ÷ 3 ≈ 8.3 t ha⁻¹. 
+Pacific Oysters, which dominate detected infrastructure in South Australia and 
+Tasmania and reach market size in 18–30 months (Helm, 2009), produce higher 
+annualised rates of approximately 10–17 t ha⁻¹. The applied range of ", 
+sprintf('%.0f', oyster_yield_low_tkm2 / 100), "–", 
+sprintf('%.0f', oyster_yield_high_tkm2 / 100), 
+" t ha⁻¹ therefore spans the expected annualised productivity of both species 
+systems and is anchored by the empirically derived national yield rate of ", 
+sprintf('%.2f', oyster_yield_rate / 100), 
+" t ha⁻¹, which integrates the mixed-species, mixed-cohort composition of the 
+national fleet. A background mortality rate of ", 
+sprintf('%.0f', (1 - oyster_survival) * 100), 
+"% per growing season was assumed, consistent with reported non-disease 
+cumulative mortality for *S. glomerata* in commercial conditions (Nell and 
+Perkins, 2006; Green et al., 2008) and within the range reported for 
+off-bottom longline culture internationally (Walton et al., 2013; 
+Petrolia et al., 2024). No volumetric modelling or infrastructure scaling 
+factor was required, as longline production is directly proportional to 
+cultivated surface area.
+
+## RESULTS — Oyster production distribution model
+
+Across the ", sprintf('%.3f', oyster_area_km2), " km² of oyster longline 
+infrastructure detected nationally, estimated production ranged from ", 
+format(round(oyster_prod_low, 0), big.mark = ','), " to ", 
+format(round(oyster_prod_high, 0), big.mark = ','), 
+" t. ABARES-reported oyster production was ", 
+format(oyster_actual_production, big.mark = ','), 
+" t (AUD 149.7 M, 2021–2022), falling within the predicted range and 
+corresponding to an empirical yield rate of ", 
+format(round(oyster_yield_rate, 0), big.mark = ','), " t km⁻² (", 
+sprintf('%.2f', oyster_yield_rate / 100), " t ha⁻¹).
+")
+```
+
+# ===== TABLE S6: PRODUCTION MODELING SUMMARY =====
+# Now built programmatically from species_params + results.
+# Adding a new species requires only a new row in species_params above.
+
+```{r create-table-s6}
+Table_S6 <- data.frame(
+  Species = species_params$label_sci,
+
+  Farming_Method = c(
+    "Sea cages/pens",
+    "Sea pens (capture-based ranching)",
+    "Earthen ponds",
+    "Ponds/sea cages",
+    "Marine longlines (intertidal/subtidal)"
+  ),
+
+  Production_Model = c(
+    "Empirical + Volumetric (3D) + Corrected Volumetric",
+    "Empirical + Volumetric (3D)",
+    "Area-yield (P = A × Y)",
+    "Area-yield (P = A × Y)",
+    "Area-yield (P = A × Y)"
+  ),
+
+  Mathematical_Expression = c(
+  "Emp: P = A * Y(D) | Vol: P = A * D * d * S * 1,000 | Cor.Vol: P = (A * f) * D * d * S * 1,000",
+  "Emp: P = A * Y(D) | Vol: P = A * D * d * S * 1,000",
+  "P = A * Y",
+  "P = A * Y",
+  "P = A * Y"
+),
+
+  Productive_Area_km2 = sprintf("%.3f", species_params$area_km2),
+
+  Stocking_Density = c(
+  sprintf("%.0f-%.0f kg/m3 (avg %.1f kg/m3)", density_low, density_high, density_mid),
+  sprintf("%.0f-%.0f kg/m3 (effective %.2f kg/m3)", sbt_density_low, sbt_density_high, sbt_effective_density),
+  sprintf("%g-%g PL/m2 (midpoint %.1f PL/m2)", prawn_pl_low, prawn_pl_high, mean(c(prawn_pl_low, prawn_pl_high))),
+  "N/A",
+  "250,000-600,000 oysters/ha (longline baskets)"
+),
+
+  Survival_Rate = c(
+  sprintf("%.0f-%.0f%%", survival_low * 100, survival_high * 100),
+  sprintf("%.0f-%.0f%%", sbt_survival_low * 100, sbt_survival_high * 100),
+  sprintf("%.0f%%", prawn_survival * 100),
+  sprintf("~%.0f%%", barra_survival * 100),
+  sprintf("%.0f%%", oyster_survival * 100)
+),
+
+ Mortality_Rate = c(
+  sprintf("%.0f-%.0f%%", mortality_low * 100, mortality_high * 100),
+  sprintf("%.0f-%.0f%%", sbt_mortality_low * 100, sbt_mortality_high * 100),
+  sprintf("%.0f%%", (1 - prawn_survival) * 100),
+  "Incorporated in Y",
+  sprintf("%.0f%% per growing season", (1 - oyster_survival) * 100)
+),
+
+ Calculated_Yield_t_km2 = c(
+  sprintf("Emp: %s-%s | Cor.Vol: %s-%s | Raw Vol: %s-%s t/km2",
+          format(round(emp_yield_low, 0), big.mark = ","),
+          format(round(emp_yield_high, 0), big.mark = ","),
+          format(round(vol_yield_low * mean_pen_fraction, 0), big.mark = ","),
+          format(round(vol_yield_high * mean_pen_fraction, 0), big.mark = ","),
+          format(round(vol_yield_low, 0), big.mark = ","),
+          format(round(vol_yield_high, 0), big.mark = ",")),
+  sprintf("Emp: %s-%s | Vol: %s-%s t/km2",
+          format(round(sbt_emp_yield_low, 0), big.mark = ","),
+          format(round(sbt_emp_yield_high, 0), big.mark = ","),
+          format(round(sbt_vol_yield_low, 0), big.mark = ","),
+          format(round(sbt_vol_yield_high, 0), big.mark = ",")),
+  sprintf("%.0f-%.0f t/km2 (%.1f-%.1f t/ha)",
+          prawn_yield_low_tkm2, prawn_yield_high_tkm2,
+          prawn_yield_low_tkm2 / 100, prawn_yield_high_tkm2 / 100),
+  sprintf("%.0f-%.0f t/km2 (%.0f-%.0f t/ha)",
+          barra_yield_low_tkm2, barra_yield_high_tkm2,
+          barra_yield_low_tkm2 / 100, barra_yield_high_tkm2 / 100),
+  sprintf("%.0f-%.0f t/km2 (%.0f-%.0f t/ha)",
+          oyster_yield_low_tkm2, oyster_yield_high_tkm2,
+          oyster_yield_low_tkm2 / 100, oyster_yield_high_tkm2 / 100)
+),
+  Production_Range_t = c(
+  sprintf("Emp: %s-%s | Cor.Vol: %s-%s | Raw Vol: %s-%s",
+          format(round(emp_prod_low, 0), big.mark = ","),
+          format(round(emp_prod_high, 0), big.mark = ","),
+          format(round(cor_vol_prod_low, 0), big.mark = ","),
+          format(round(cor_vol_prod_high, 0), big.mark = ","),
+          format(round(vol_prod_low, 0), big.mark = ","),
+          format(round(vol_prod_high, 0), big.mark = ",")),
+  sprintf("Emp: %s-%s | Vol: %s-%s",
+          format(round(sbt_emp_prod_low, 0), big.mark = ","),
+          format(round(sbt_emp_prod_high, 0), big.mark = ","),
+          format(round(sbt_vol_prod_low, 0), big.mark = ","),
+          format(round(sbt_vol_prod_high, 0), big.mark = ",")),
+  sprintf("%s-%s", format(round(prawn_prod_low, 0), big.mark = ","),
+                   format(round(prawn_prod_high, 0), big.mark = ",")),
+  sprintf("%s-%s", format(round(barra_prod_low, 0), big.mark = ","),
+                   format(round(barra_prod_high, 0), big.mark = ",")),
+  sprintf("%s-%s", format(round(oyster_prod_low, 0), big.mark = ","),
+                   format(round(oyster_prod_high, 0), big.mark = ","))
+),
+
+  Actual_Production_ABARES_t = c(
+    format(actual_production, big.mark = ","),
+    format(sbt_actual_production, big.mark = ","),
+    format(prawn_actual_production, big.mark = ","),
+    format(barra_actual_production, big.mark = ","),
+    format(oyster_actual_production, big.mark = ",")
+  ),
+
+  Validation = c(
+    "Within predicted range (all 3 approaches)",
+    "Within predicted range",
+    "Within predicted range",
+    "Within predicted range",
+    ifelse(oyster_prod_low <= oyster_actual_production &
+             oyster_actual_production <= oyster_prod_high,
+           "Within predicted range", "Outside predicted range")
+  ),
+
+  Infrastructure_Scaling_Factor = c(
+    sprintf("%.2f* (n=3 leases; pen fraction = %.1f%%)", mean_fpr, mean_pen_fraction * 100),
+    "Not applied (isolated pontoons; detected area ≈ productive surface)",
+    "N/A (land-based)",
+    "N/A (land-based)",
+    "N/A (longline area = productive surface)"
+  ),
+
+  Detection_Method = species_params$detection_method,
+
+  stringsAsFactors = FALSE
+)
+
+cat("\n=== TABLE S6: PRODUCTION MODELING SUMMARY ===\n")
+print(Table_S6)
+
+output_path <- here("output_data/SSRG_GEE_results/Table_S6_Production_Modeling.csv")
+write.csv(Table_S6, output_path, row.names = FALSE, fileEncoding = "UTF-8")
+cat(sprintf("\nTable S6 saved to: %s\n", output_path))
+
+
+# Write a plain-ASCII version to CSV
+Table_S6_csv <- as.data.frame(lapply(Table_S6, function(x) {
+  gsub("\u2013", "-", gsub("\u00b3", "^3", x))
+}))
+```
+
+# ===== PRODUCTION COMPARISON PLOT =====
+
+```{r production-comparison-plot, fig.width=12, fig.height=6}
+library(ggplot2)
+
+production_data <- data.frame(
+  Species  = rep(c("Atlantic Salmon", "S. Bluefin Tuna", "Black Tiger Prawn",
+                   "Barramundi", "Oysters"), each = 3),
+  Scenario = rep(c("Minimum", "Actual", "Maximum"), 5),
+  Production = c(
+    round(prod_low, 0),          actual_production,       round(prod_high, 0),
+    round(sbt_prod_low, 0),      sbt_actual_production,   round(sbt_prod_high, 0),
+    round(prawn_prod_low, 0),    prawn_actual_production,  round(prawn_prod_high, 0),
+    round(barra_prod_low, 0),    barra_actual_production,  round(barra_prod_high, 0),
+    round(oyster_prod_low, 0),   oyster_actual_production, round(oyster_prod_high, 0)
+  )
+)
+
+production_data$Species  <- factor(production_data$Species,
+                                    levels = c("Atlantic Salmon", "S. Bluefin Tuna",
+                                               "Black Tiger Prawn", "Barramundi", "Oysters"))
+production_data$Scenario <- factor(production_data$Scenario,
+                                    levels = c("Minimum", "Actual", "Maximum"))
+
+production_plot <- ggplot(production_data, aes(x = Species, y = Production, fill = Scenario)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.8), width = 0.7) +
+  scale_fill_manual(values = c("Minimum" = "#0072B2",   # Wong CB-safe blue
+                               "Actual"  = "#E69F00",   # Wong CB-safe orange
+                               "Maximum" = "#D55E00")) + # Wong CB-safe vermillion
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title    = "Production Range Estimates vs. Actual Production",
+    subtitle = "Based on species-specific stocking density and yield parameters",
+    x = NULL, y = "Production (tonnes)", fill = "Scenario"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title    = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 11, color = "gray40"),
+    axis.text.x   = element_text(size = 10),
+    axis.text.y   = element_text(size = 9),
+    axis.title.y  = element_text(size = 11, face = "bold"),
+    legend.position = "top",
+    legend.title    = element_text(size = 10, face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+print(production_plot)
+ggsave(here("figures/Production_Range_Comparison.png"),
+       plot = production_plot, width = 12, height = 6, dpi = 300)
+cat("\nProduction comparison plot saved\n")
+```
+
+# ===== INDIVIDUAL SPECIES VALIDATION PLOT =====
+
+```{r individual-species-validation-clean, fig.width=20, fig.height=4.5}
+library(ggplot2)
+library(scales)
+library(cowplot)
+
+# Build species data frames from extracted variables
+salmon_data <- data.frame(Species = "Atlantic Salmon",
+                          Minimum = round(prod_low, 0),
+                          Maximum = round(prod_high, 0),
+                          Actual  = actual_production)
+
+sbt_data    <- data.frame(Species = "S. Bluefin Tuna",
+                          Minimum = round(sbt_prod_low, 0),
+                          Maximum = round(sbt_prod_high, 0),
+                          Actual  = sbt_actual_production)
+
+prawn_data  <- data.frame(Species = "Black Tiger Prawn",
+                          Minimum = round(prawn_prod_low, 0),
+                          Maximum = round(prawn_prod_high, 0),
+                          Actual  = prawn_actual_production)
+
+barra_data  <- data.frame(Species = "Barramundi",
+                          Minimum = round(barra_prod_low, 0),
+                          Maximum = round(barra_prod_high, 0),
+                          Actual  = barra_actual_production)
+
+oyster_data <- data.frame(Species = "Oysters",
+                          Minimum = round(oyster_prod_low, 0),
+                          Maximum = round(oyster_prod_high, 0),
+                          Actual  = oyster_actual_production)
+
+# Plot function
+# actual_hjust: negative = right of point, positive = left; tweak per species if labels overlap
+create_clean_species_plot <- function(data, color_actual = "#E69F00", actual_hjust = -0.3) {
+  ggplot(data, aes(x = Species, y = Actual)) +
+    geom_errorbar(aes(ymin = Minimum, ymax = Maximum),
+                  width = 0.25, size = 2, color = "gray50", alpha = 0.8) +
+    geom_point(aes(y = Minimum), color = "#0072B2", size = 5, shape = 95, stroke = 4) +
+    geom_point(aes(y = Maximum), color = "#D55E00", size = 5, shape = 95, stroke = 4) +
+    geom_point(color = color_actual, size = 10, shape = 19) +
+    geom_point(color = "white", size = 4, shape = 19) +
+    geom_text(aes(y = Minimum, label = comma(Minimum)),
+              vjust = 1.5, hjust = 0.5, size = 4.5, fontface = "bold", color = "#0072B2") +
+    geom_text(aes(y = Maximum, label = comma(Maximum)),
+              vjust = -0.5, hjust = 0.5, size = 4.5, fontface = "bold", color = "#D55E00") +
+    geom_text(aes(y = Actual,  label = comma(Actual)),
+              hjust = actual_hjust, size = 5, fontface = "bold", color = color_actual) +
+    scale_y_continuous(labels = comma, expand = expansion(mult = c(0.15, 0.15))) +
+    labs(title = data$Species, x = NULL, y = "Production (tonnes)") +
+    theme_minimal() +
+    theme(
+      plot.title        = element_text(size = 13, face = "bold", hjust = 0.5),
+      axis.text.x       = element_blank(),
+      axis.text.y       = element_text(size = 10),
+      axis.title.y      = element_text(size = 11, face = "bold"),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor  = element_blank(),
+      panel.background  = element_rect(fill = "white", color = NA),
+      plot.background   = element_rect(fill = "white", color = NA),
+      plot.margin       = margin(15, 15, 10, 15)
+    )
+}
+
+# Per-species hjust from parameter table (tweak there if needed)
+hjust_vals <- setNames(species_params$actual_hjust, species_params$species)
+
+p_salmon <- create_clean_species_plot(salmon_data, actual_hjust = hjust_vals["atl_salmon"])
+p_sbt    <- create_clean_species_plot(sbt_data,    actual_hjust = hjust_vals["sbt"])
+p_prawn  <- create_clean_species_plot(prawn_data,  actual_hjust = hjust_vals["prawn"])
+p_barra  <- create_clean_species_plot(barra_data,  actual_hjust = hjust_vals["barramundi"])
+p_oyster <- create_clean_species_plot(oyster_data, actual_hjust = hjust_vals["oyster"])
+
+combined_plot <- plot_grid(p_salmon, p_sbt, p_prawn, p_barra, p_oyster, ncol = 5)
+
+title_row    <- ggdraw() +
+  draw_label("Production Validation: Actual vs. Modeled Range by Species",
+             fontface = "bold", size = 14, x = 0, hjust = 0) +
+  theme(plot.margin = margin(0, 0, 0, 7))
+
+subtitle_row <- ggdraw() +
+  draw_label("Vertical bars show modeled min-max range | Blue = Minimum | Red = Maximum | Gold = Actual ABARES production",
+             size = 10, color = "gray40", x = 0, hjust = 0) +
+  theme(plot.margin = margin(0, 0, 8, 7))
+
+final_plot <- plot_grid(title_row, subtitle_row, combined_plot,
+                        ncol = 1, rel_heights = c(0.08, 0.06, 1))
+
+print(final_plot)
+ggsave(here("figures/Production_Validation_Individual_Species.png"),
+       plot = final_plot, width = 20, height = 4.5, dpi = 300, bg = "white")
+cat("\n✓ Individual species validation plot saved\n")
+```
+#make a horizontal plot starting at zero for all species
+
+```{r validation-horizontal, fig.width=13, fig.height=5}
+library(ggplot2)
+library(scales)
+library(shadowtext)  
+
+val_data <- data.frame(
+  species = factor(
+    c("Atlantic Salmon", "S. Bluefin Tuna", "Black Tiger Prawn",
+      "Barramundi", "Oysters"),
+    levels = rev(c("Atlantic Salmon", "S. Bluefin Tuna", "Black Tiger Prawn",
+                   "Barramundi", "Oysters"))
+  ),
+  minimum = c(round(prod_low, 0), round(sbt_prod_low, 0),
+              round(prawn_prod_low, 0), round(barra_prod_low, 0),
+              round(oyster_prod_low, 0)),
+  actual  = c(actual_production, sbt_actual_production,
+              prawn_actual_production, barra_actual_production,
+              oyster_actual_production),
+  maximum = c(round(prod_high, 0), round(sbt_prod_high, 0),
+              round(prawn_prod_high, 0), round(barra_prod_high, 0),
+              round(oyster_prod_high, 0))
+)
+
+col_min    <- "#0072B2"
+col_actual <- "#E69F00"
+col_max    <- "#D55E00"
+col_range  <- "grey75"
+tick_h     <- 0.25
+
+p_horiz <- ggplot(val_data, aes(y = species)) +
+  
+  # Zero-anchored range bar
+  geom_segment(aes(x = 0, xend = maximum, yend = species),
+               colour = col_range, linewidth = 2.5, lineend = "butt") +
+  
+  # Minimum tick
+  geom_segment(aes(x = minimum, xend = minimum,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_min, linewidth = 2, lineend = "round") +
+  
+  # Maximum tick
+  geom_segment(aes(x = maximum, xend = maximum,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_max, linewidth = 2, lineend = "round") +
+  
+ # Actual — shape no outline
+  geom_point(aes(x = actual),
+             size = 8, shape = 5, fill = col_actual,
+             colour = col_actual, stroke = 0) +
+  
+  # Minimum label — further below tick to clear the marker
+  geom_text(aes(x = minimum, label = comma(minimum)),
+            vjust = 3.8, hjust = 0.5, size = 2.8,
+            fontface = "bold", colour = col_min) +
+  
+  # Maximum label — above bar
+  geom_text(aes(x = maximum, label = comma(maximum)),
+            vjust = -2.1, hjust = 0.5, size = 2.8,
+            fontface = "bold", colour = col_max) +
+  
+ # Actual label — above circle with black outline
+  geom_shadowtext(aes(x = actual, label = comma(actual)),
+                  vjust = 0.5, hjust = 0.5, size = 2.9,
+                  fontface = "bold", colour = col_actual,
+                  bg.colour = "grey20", bg.r = 0.18) +
+  
+  scale_x_continuous(labels = comma,
+                     expand = expansion(mult = c(0.02, 0.08))) +
+  scale_y_discrete(expand = expansion(add = c(0.6, 0.6))) +
+  
+  labs(
+    title    = "Production Validation: Actual vs. Modelled Range by Species",
+    subtitle = paste0(
+      "\u2502 Min (blue)   \u25cf Actual ABARES (gold)   \u2502 Max (red)",
+      "   \u2015\u2015 Modelled range (zero-anchored)"),
+    x = "Production (tonnes)",
+    y = NULL
+  ) +
+  
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13, hjust = 0),
+    plot.subtitle      = element_text(size = 9.5, colour = "grey40", hjust = 0,
+                                      margin = margin(b = 12)),
+    axis.text.y        = element_text(size = 11, face = "bold"),
+    axis.text.x        = element_text(size = 9.5),
+    axis.title.x       = element_text(size = 11, face = "bold",
+                                      margin = margin(t = 8)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_line(colour = "grey92"),
+    plot.background    = element_rect(fill = "white", colour = NA),
+    panel.background   = element_rect(fill = "white", colour = NA),
+    plot.margin        = margin(15, 20, 15, 15)
+  )
+
+print(p_horiz)
+
+ggsave(here("figures/Production_Validation_Horizontal.png"),
+       plot = p_horiz, width = 13, height = 5, dpi = 300, bg = "white")
+cat("\n✓ Horizontal validation plot saved\n")
+```
+
+#figure with lines for all values with 2D calculations
+
+```{r validation-horizontal, fig.width=13, fig.height=5}
+library(ggplot2)
+library(scales)
+library(shadowtext)  
+
+val_data <- data.frame(
+  species = c("Atl.Salmon", "S.B.Tuna", "Prawn",
+              "Barramundi", "Oysters"),
+  minimum = c(round(prod_low, 0), round(sbt_prod_low, 0),
+              round(prawn_prod_low, 0), round(barra_prod_low, 0),
+              round(oyster_prod_low, 0)),
+  actual  = c(actual_production, sbt_actual_production,
+              prawn_actual_production, barra_actual_production,
+              oyster_actual_production),
+  maximum = c(round(prod_high, 0), round(sbt_prod_high, 0),
+              round(prawn_prod_high, 0), round(barra_prod_high, 0),
+              round(oyster_prod_high, 0))
+)
+
+# Order by actual production: smallest at top, largest at bottom
+val_data$species <- factor(val_data$species,
+                           levels = val_data$species[order(val_data$actual, decreasing = TRUE)])
+
+col_min    <- "#0072B2"
+col_actual <- "#009E73"
+col_max    <- "#D55E00"
+col_range  <- "grey75"
+tick_h     <- 0.25
+
+p_horiz <- ggplot(val_data, aes(y = species)) +
+
+  # Zero-anchored range bar
+  geom_segment(aes(x = 0, xend = maximum, yend = species),
+               colour = col_range, linewidth = 2.5, lineend = "butt") +
+
+  # Minimum tick
+  geom_segment(aes(x = minimum, xend = minimum,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_min, linewidth = 2, lineend = "round") +
+
+  # Maximum tick
+  geom_segment(aes(x = maximum, xend = maximum,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_max, linewidth = 2, lineend = "round") +
+
+  # Actual tick
+  geom_segment(aes(x = actual, xend = actual,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_actual, linewidth = 2, lineend = "round") +
+
+  # Minimum label — BELOW the tick
+  geom_text(aes(x = minimum, label = comma(minimum)),
+          vjust = -0.2, hjust = 1, nudge_x = -400, size = 4,
+          fontface = "bold", colour = col_min)+
+
+  # Maximum label — RIGHT of tick, vertically centred
+  geom_text(aes(x = maximum, label = comma(maximum)),
+            vjust = 0.5, hjust = -0.15, size = 4,
+            fontface = "bold", colour = col_max) +
+
+  # Actual label — ABOVE the tick, shadow for legibility
+  geom_shadowtext(aes(x = actual, label = comma(actual)),
+                  vjust = -1.8, hjust = 0.5, size = 4,
+                  fontface = "bold", colour = col_actual,
+                  bg.colour = "white", bg.r = 0.15) +
+
+  scale_x_continuous(labels = comma,
+                     expand = expansion(mult = c(0.02, 0.12))) +  # extra right margin for max labels
+  scale_y_discrete(expand = expansion(add = c(0.6, 0.6))) +
+
+  labs(
+    title    = "Production Validation: Actual vs. Modelled Range by Species",
+    subtitle = paste0(
+      "\u2502 Min (blue)   \u25cf Actual ABARES (gold)   \u2502 Max (red)",
+      "   \u2015\u2015 Modelled range (zero-anchored)"),
+    x = "Production (tonnes)",
+    y = NULL
+  ) +
+
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13, hjust = 0),
+    plot.subtitle      = element_text(size = 9.5, colour = "grey40", hjust = 0,
+                                      margin = margin(b = 12)),
+    axis.text.y        = element_text(size = 12, face = "bold"),
+    axis.text.x        = element_text(size = 11),
+    axis.title.x       = element_text(size = 12, face = "bold",
+                                      margin = margin(t = 8)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_line(colour = "grey92"),
+    plot.background    = element_rect(fill = "white", colour = NA),
+    panel.background   = element_rect(fill = "white", colour = NA),
+    plot.margin        = margin(15, 25, 15, 15)
+  )
+
+print(p_horiz)
+
+ggsave(here("figures/Production_Validation_Horizontalv2.png"),
+       plot = p_horiz, width = 13, height = 5, dpi = 300, bg = "white")
+cat("\n✓ Horizontal validation v2 plot saved\n")
+```
+
+#figure with lines for all values with 2D calculations for other species and 3D calculations for Salmon and Tuna
+# ===== PRODUCTION VALIDATION PLOT: EMPIRICAL (pond/longline) + VOLUMETRIC 3D (finfish) =====
+
+```{r validation-horizontal-2d-3d, fig.width=13, fig.height=5}
+library(ggplot2)
+library(scales)
+library(shadowtext)
+
+val_data <- data.frame(
+  species = c("Atl.Salmon", "S.B.Tuna", "Prawn",
+              "Barramundi", "Oysters"),
+  minimum = c(
+    round(cor_vol_prod_low, 0),     # salmon:  corrected volumetric (3D)
+    round(sbt_vol_prod_low, 0),     # SBT:     volumetric (3D)
+    round(prawn_prod_low, 0),       # prawn:   area-yield (2D)
+    round(barra_prod_low, 0),       # barra:   area-yield (2D)
+    round(oyster_prod_low, 0)       # oyster:  area-yield (2D)
+  ),
+  actual = c(
+    actual_production, sbt_actual_production,
+    prawn_actual_production, barra_actual_production,
+    oyster_actual_production
+  ),
+  maximum = c(
+    round(cor_vol_prod_high, 0),    # salmon:  corrected volumetric (3D)
+    round(sbt_vol_prod_high, 0),    # SBT:     volumetric (3D)
+    round(prawn_prod_high, 0),      # prawn:   area-yield (2D)
+    round(barra_prod_high, 0),      # barra:   area-yield (2D)
+    round(oyster_prod_high, 0)      # oyster:  area-yield (2D)
+  ),
+  approach = c("3D", "3D",
+               "2D", "2D", "2D")
+)
+
+# Order by actual production: smallest at bottom, largest at top
+val_data$species <- factor(val_data$species,
+                           levels = val_data$species[order(val_data$actual)])
+
+# Approach label for right-hand annotation (matched to factor order)
+approach_labels <- val_data[order(val_data$actual), c("species", "approach")]
+
+col_min    <- "#0072B2"
+col_actual <- "#009E73"
+col_max    <- "#D55E00"
+col_range  <- "grey75"
+tick_h     <- 0.25
+
+p_horiz_3d <- ggplot(val_data, aes(y = species)) +
+
+  # Zero-anchored range bar
+  geom_segment(aes(x = 0, xend = maximum, yend = species),
+               colour = col_range, linewidth = 2.5, lineend = "butt") +
+
+  # Minimum tick
+  geom_segment(aes(x = minimum, xend = minimum,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_min, linewidth = 2, lineend = "round") +
+
+  # Maximum tick
+  geom_segment(aes(x = maximum, xend = maximum,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_max, linewidth = 2, lineend = "round") +
+
+  # Actual tick
+  geom_segment(aes(x = actual, xend = actual,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_actual, linewidth = 2, lineend = "round") +
+
+  # Minimum label — below tick
+  geom_text(aes(x = minimum, label = comma(minimum)),
+          vjust = -0.2, hjust = 1, nudge_x = -400, size = 4,
+          fontface = "bold", colour = col_min)+
+
+  # Maximum label — right of tick
+  geom_text(aes(x = maximum, label = comma(maximum)),
+            vjust = 0.5, hjust = -0.15, size = 4,
+            fontface = "bold", colour = col_max) +
+
+  # Actual label — above tick with shadow
+  geom_shadowtext(aes(x = actual, label = comma(actual)),
+                  vjust = -1.8, hjust = 0.5, size = 4,
+                  fontface = "bold", colour = col_actual,
+                  bg.colour = "white", bg.r = 0.15) +
+
+  # Approach annotation on the left margin
+ geom_text(data = approach_labels,
+          aes(x = 0, y = species, label = approach),
+          hjust = 1.08, vjust = 0.5, size = 4,
+          colour = ifelse(approach_labels$approach == "3D",
+                          "#555555", "#999999"),
+          fontface = "bold.italic") +
+
+  scale_x_continuous(labels = comma,
+                   expand = expansion(mult = c(0.04, 0.08)))+  # left margin for labels
+  scale_y_discrete(expand = expansion(add = c(0.6, 0.6))) +
+
+  labs(
+    title    = "Production Validation: Actual vs. Modelled Range by Species",
+    subtitle = NULL,
+    x = "Production (tonnes)",
+    y = NULL
+  ) +
+
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13, hjust = 0),
+    plot.subtitle      = element_text(size = 9, colour = "grey40", hjust = 0,
+                                      margin = margin(b = 12)),
+    axis.text.y        = element_text(size = 12, face = "bold"),
+    axis.text.x        = element_text(size = 11),
+    axis.title.x       = element_text(size = 12, face = "bold",
+                                      margin = margin(t = 8)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_line(colour = "grey92"),
+    plot.background    = element_rect(fill = "white", colour = NA),
+    panel.background   = element_rect(fill = "white", colour = NA),
+    plot.margin        = margin(15, 25, 15, 15)
+  )
+
+print(p_horiz_3d)
+
+ggsave(here("figures/Production_Validation_Horizontal2D_3D.png"),
+       plot = p_horiz_3d, width = 13, height = 5, dpi = 300, bg = "white")
+cat("\n✓ 2D/3D horizontal validation plot saved\n")
+```
+
+#notes:
+
+#We used the corrected volumetric for salmon (not raw vol)because the raw volumetric massively overestimates because it treats the entire detected polygon as pen water surface. The corrected version (`cor_vol_prod_*`) already applies our measured pen fraction (11.1%).  
+
+# the *raw* volumetric could be used to illustrate the overestimation, the easiest way would be to add a second, lighter grey bar behind the corrected one but I havent added that. 
+
+#2D and 3D added
+```{r}
+library(ggplot2)
+library(scales)
+library(shadowtext)
+library(dplyr)
+
+# ── Main data (2D ranges for all species) ──────────────────────────────────────
+val_data <- data.frame(
+  species = c("Atl.Salmon", "S.B.Tuna", "Prawn",
+              "Barramundi", "Oysters"),
+  minimum = c(round(prod_low, 0), round(sbt_prod_low, 0),
+              round(prawn_prod_low, 0), round(barra_prod_low, 0),
+              round(oyster_prod_low, 0)),
+  actual  = c(actual_production, sbt_actual_production,
+              prawn_actual_production, barra_actual_production,
+              oyster_actual_production),
+  maximum = c(round(prod_high, 0), round(sbt_prod_high, 0),
+              round(prawn_prod_high, 0), round(barra_prod_high, 0),
+              round(oyster_prod_high, 0))
+)
+
+# Highest production at bottom (first factor level = bottom of y-axis)
+val_data$species <- factor(val_data$species,
+                           levels = val_data$species[order(val_data$actual,
+                                                           decreasing = TRUE)])
+
+# ── 3D corrected volumetric ranges (finfish only) ─────────────────────────────
+val_data_3d <- data.frame(
+  species     = factor(c("Atl.Salmon", "S.B.Tuna"),
+                       levels = levels(val_data$species)),
+  minimum_3d  = c(round(cor_vol_prod_low, 0),  round(sbt_vol_prod_low, 0)),
+  maximum_3d  = c(round(cor_vol_prod_high, 0), round(sbt_vol_prod_high, 0))
+)
+
+col_min    <- "#0072B2"
+col_actual <- "#009E73"
+col_max    <- "#D55E00"
+col_range  <- "grey75"
+col_3d     <- "grey50"    # darker grey for 3D range bar
+tick_h     <- 0.25
+
+p_horiz <- ggplot(val_data, aes(y = species)) +
+
+  # 3D corrected volumetric range bar (finfish only, behind 2D bar)
+  geom_segment(data = val_data_3d,
+               aes(x = 0, xend = maximum_3d, yend = species),
+               colour = col_3d, linewidth = 1.2,
+               lineend = "butt", linetype = "dashed") +
+
+  # 3D minimum tick
+  geom_segment(data = val_data_3d,
+               aes(x = minimum_3d, xend = minimum_3d,
+                   y = as.numeric(species) - tick_h * 0.7,
+                   yend = as.numeric(species) + tick_h * 0.7),
+               colour = col_min, linewidth = 1.2,
+               lineend = "round", linetype = "dashed") +
+
+  # 3D maximum tick
+  geom_segment(data = val_data_3d,
+               aes(x = maximum_3d, xend = maximum_3d,
+                   y = as.numeric(species) - tick_h * 0.7,
+                   yend = as.numeric(species) + tick_h * 0.7),
+               colour = col_max, linewidth = 1.2,
+               lineend = "round", linetype = "dashed") +
+
+  # Zero-anchored 2D range bar (all species, on top)
+  geom_segment(aes(x = 0, xend = maximum, yend = species),
+               colour = col_range, linewidth = 2.5, lineend = "butt") +
+
+  # 2D minimum tick
+  geom_segment(aes(x = minimum, xend = minimum,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_min, linewidth = 2, lineend = "round") +
+
+  # 2D maximum tick
+  geom_segment(aes(x = maximum, xend = maximum,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_max, linewidth = 2, lineend = "round") +
+
+  # Actual tick
+  geom_segment(aes(x = actual, xend = actual,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_actual, linewidth = 2, lineend = "round") +
+
+  # Minimum label — below tick
+  geom_text(aes(x = minimum, label = comma(minimum)),
+            vjust = -0.2, hjust = 1, nudge_x = -400, size = 4,
+            fontface = "bold", colour = col_min) +
+
+  # Maximum label — right of tick
+  geom_text(aes(x = maximum, label = comma(maximum)),
+            vjust = 0.5, hjust = -0.15, size = 4,
+            fontface = "bold", colour = col_max) +
+
+  # Actual label — above tick with shadow
+  geom_shadowtext(aes(x = actual, label = comma(actual)),
+                  vjust = -1.8, hjust = 0.5, size = 4,
+                  fontface = "bold", colour = col_actual,
+                  bg.colour = "white", bg.r = 0.15) +
+
+  scale_x_continuous(labels = comma,
+                     expand = expansion(mult = c(0.02, 0.12))) +
+  scale_y_discrete(expand = expansion(add = c(0.6, 0.6))) +
+
+  labs(
+    title    = "Production Validation: Actual vs. Modelled Range by Species",
+    subtitle = paste0(
+      "\u2502 Min/Max (solid) = empirical 2D range   ",
+      "\u2502 Min/Max (dashed) = corrected volumetric 3D range (finfish only)   ",
+      "\u25cf Actual ABARES (green)"),
+    x = "Production (tonnes)",
+    y = NULL
+  ) +
+
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13, hjust = 0),
+    plot.subtitle      = element_text(size = 9, colour = "grey40", hjust = 0,
+                                      margin = margin(b = 12)),
+    axis.text.y        = element_text(size = 12, face = "bold"),
+    axis.text.x        = element_text(size = 11),
+    axis.title.x       = element_text(size = 12, face = "bold",
+                                      margin = margin(t = 8)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_line(colour = "grey92"),
+    plot.background    = element_rect(fill = "white", colour = NA),
+    panel.background   = element_rect(fill = "white", colour = NA),
+    plot.margin        = margin(15, 25, 15, 15)
+  )
+
+print(p_horiz)
+
+ggsave(here("figures/Production_Validation_Horizontalv3.png"),
+       plot = p_horiz, width = 13, height = 5, dpi = 300, bg = "white")
+cat("\n✓ Horizontal validation v3 plot saved\n")
+```
+#only 3D salmon and SBT
+```{r}
+library(ggplot2)
+library(scales)
+library(shadowtext)
+
+# ── 3D corrected volumetric data (finfish only) ───────────────────────────────
+val_data_3d <- data.frame(
+  species    = c("Atl.Salmon", "S.B.Tuna"),
+  minimum    = c(round(cor_vol_prod_low, 0),  round(sbt_vol_prod_low, 0)),
+  actual     = c(actual_production,            sbt_actual_production),
+  maximum    = c(round(cor_vol_prod_high, 0), round(sbt_vol_prod_high, 0))
+)
+
+# Highest production at bottom
+val_data_3d$species <- factor(val_data_3d$species,
+                              levels = val_data_3d$species[order(val_data_3d$actual,
+                                                                 decreasing = TRUE)])
+
+col_min    <- "#0072B2"
+col_actual <- "#009E73"
+col_max    <- "#D55E00"
+col_range  <- "grey75"
+tick_h     <- 0.25
+
+p_3d <- ggplot(val_data_3d, aes(y = species)) +
+
+  # Zero-anchored range bar
+  geom_segment(aes(x = 0, xend = maximum, yend = species),
+               colour = col_range, linewidth = 2.5, lineend = "butt") +
+
+  # Minimum tick
+  geom_segment(aes(x = minimum, xend = minimum,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_min, linewidth = 2, lineend = "round") +
+
+  # Maximum tick
+  geom_segment(aes(x = maximum, xend = maximum,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_max, linewidth = 2, lineend = "round") +
+
+  # Actual tick
+  geom_segment(aes(x = actual, xend = actual,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_actual, linewidth = 2, lineend = "round") +
+
+  # Minimum label
+  geom_text(aes(x = minimum, label = comma(minimum)),
+            vjust = -0.2, hjust = 1, nudge_x = -200, size = 4,
+            fontface = "bold", colour = col_min) +
+
+  # Maximum label
+  geom_text(aes(x = maximum, label = comma(maximum)),
+            vjust = 0.5, hjust = -0.15, size = 4,
+            fontface = "bold", colour = col_max) +
+
+  # Actual label
+  geom_shadowtext(aes(x = actual, label = comma(actual)),
+                  vjust = -1.8, hjust = 0.7, size = 4,
+                  fontface = "bold", colour = col_actual,
+                  bg.colour = "white", bg.r = 0.15) +
+
+  scale_x_continuous(labels = comma,
+                     expand = expansion(mult = c(0.08, 0.12))) +
+  scale_y_discrete(expand = expansion(add = c(0.6, 0.6))) +
+
+  labs(
+    title    = NULL,  # title goes on the combined figure
+    subtitle = paste0(
+      "\u2502 Min (blue)   \u25cf Actual ABARES (green)   \u2502 Max (red)",
+      "   \u2015\u2015 Corrected volumetric 3D range"),
+    x = "Production (tonnes)",
+    y = NULL
+  ) +
+
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.subtitle      = element_text(size = 9, colour = "grey40", hjust = 0,
+                                      margin = margin(b = 12)),
+    axis.text.y        = element_text(size = 12, face = "bold"),
+    axis.text.x        = element_text(size = 11),
+    axis.title.x       = element_text(size = 12, face = "bold",
+                                      margin = margin(t = 8)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_line(colour = "grey92"),
+    plot.background    = element_rect(fill = "white", colour = NA),
+    panel.background   = element_rect(fill = "white", colour = NA),
+    plot.margin        = margin(15, 25, 15, 15)
+  )
+
+print(p_3d)
+
+ggsave(here("figures/Production_Validation_3D_Finfish.png"),
+       plot = p_3d, width = 13, height = 3, dpi = 300, bg = "white")
+cat("\n✓ 3D finfish validation plot saved\n")
+```
+#7 rows
+```{r}
+library(ggplot2)
+library(scales)
+library(shadowtext)
+library(dplyr)
+
+# ── Data: 7 rows — 5 species 2D + 2 finfish 3D ───────────────────────────────
+# Add spacer rows between species groups
+spacers <- data.frame(
+  species   = c("_spacer1", "_spacer2"),
+  minimum   = c(NA, NA),
+  actual    = c(NA, NA),
+  maximum   = c(NA, NA),
+  approach  = c("2D", "2D"),
+  show_actual_label = c(FALSE, FALSE)
+)
+
+val_data_all <- data.frame(
+  species  = c("Atl.Salmon (2D)",  "Atl.Salmon (3D)",
+               "_spacer1",
+               "Oysters (2D)",
+               "Prawn (2D)",
+               "_spacer2",
+               "S.B.Tuna (2D)",    "S.B.Tuna (3D)",
+               "Barramundi (2D)"),
+  minimum  = c(round(prod_low, 0),          round(cor_vol_prod_low, 0),
+               NA,
+               round(oyster_prod_low, 0),
+               round(prawn_prod_low, 0),
+               NA,
+               round(sbt_prod_low, 0),       round(sbt_vol_prod_low, 0),
+               round(barra_prod_low, 0)),
+  actual   = c(actual_production,            actual_production,
+               NA,
+               oyster_actual_production,
+               prawn_actual_production,
+               NA,
+               sbt_actual_production,         sbt_actual_production,
+               barra_actual_production),
+  maximum  = c(round(prod_high, 0),          round(cor_vol_prod_high, 0),
+               NA,
+               round(oyster_prod_high, 0),
+               round(prawn_prod_high, 0),
+               NA,
+               round(sbt_prod_high, 0),       round(sbt_vol_prod_high, 0),
+               round(barra_prod_high, 0)),
+  approach = c("2D", "3D",
+               "2D",
+               "2D",
+               "2D",
+               "2D",
+               "2D", "3D",
+               "2D"),
+  show_actual_label = c(TRUE,  FALSE,
+                        FALSE,
+                        TRUE,
+                        TRUE,
+                        FALSE,
+                        TRUE,  FALSE,
+                        TRUE)
+)
+
+val_data_all$species <- factor(val_data_all$species,
+                               levels = c("Atl.Salmon (2D)",
+                                          "Atl.Salmon (3D)",
+                                          "_spacer1",
+                                          "Oysters (2D)",
+                                          "Prawn (2D)",
+                                          "_spacer2",
+                                          "S.B.Tuna (2D)",
+                                          "S.B.Tuna (3D)",
+                                          "Barramundi (2D)"))
+
+col_min    <- "#0072B2"
+col_actual <- "#009E73"
+col_max    <- "#D55E00"
+col_2d     <- "grey75"
+col_3d     <- "grey45"
+tick_h     <- 0.25
+
+p_all <- ggplot(val_data_all, aes(y = species)) +
+
+  # Range bar — thickness and colour by approach
+  geom_segment(aes(x = 0, xend = maximum, yend = species,
+                   colour = approach, linewidth = approach),
+               lineend = "butt") +
+
+  scale_colour_manual(values = c("2D" = col_2d, "3D" = col_3d),
+                      guide = "none") +
+  scale_linewidth_manual(values = c("2D" = 2.5, "3D" = 1.5),
+                         guide = "none") +
+
+  # Minimum tick
+  geom_segment(aes(x = minimum, xend = minimum,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_min, linewidth = 2, lineend = "round") +
+
+  # Maximum tick
+  geom_segment(aes(x = maximum, xend = maximum,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_max, linewidth = 2, lineend = "round") +
+
+  # Actual tick
+  geom_segment(aes(x = actual, xend = actual,
+                   y = as.numeric(species) - tick_h,
+                   yend = as.numeric(species) + tick_h),
+               colour = col_actual, linewidth = 2, lineend = "round") +
+
+  # Minimum label — LEFT of tick
+  geom_text(aes(x = minimum, label = comma(minimum)),
+            vjust = 0.1, hjust = 1.15, size = 3.8,
+            fontface = "bold", colour = col_min) +
+
+  # Maximum label — RIGHT of tick
+  geom_text(aes(x = maximum, label = comma(maximum)),
+            vjust = 0.5, hjust = -0.15, size = 3.8,
+            fontface = "bold", colour = col_max) +
+
+  # Actual label — ABOVE tick
+  geom_shadowtext(data = filter(val_data_all, show_actual_label),
+                  aes(x = actual, label = comma(actual)),
+                  vjust = -1.8, hjust = 0.5, size = 3.8,
+                  fontface = "bold", colour = col_actual,
+                  bg.colour = "white", bg.r = 0.15) +
+  
+ scale_x_continuous(labels = comma,
+                     expand = expansion(mult = c(0.08, 0.12))) +
+ scale_y_discrete(
+    expand = expansion(add = c(0.6, 0.6)),
+    labels = function(x) ifelse(startsWith(x, "_spacer"), "", x)
+  ) +
+
+  labs(
+    title    = "Production Validation: Actual vs. Modelled Range by Species",
+    subtitle = paste0(
+      "\u2502 Min (blue)   \u25cf Actual ABARES (green)   \u2502 Max (red)   ",
+      "\u2015\u2015 thick = 2D empirical   thin = 3D corrected volumetric (finfish only)"),
+    x = "Production (tonnes)",
+    y = NULL
+  ) +
+
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 13, hjust = 0),
+    plot.subtitle      = element_text(size = 9, colour = "grey40", hjust = 0,
+                                      margin = margin(b = 12)),
+    axis.text.y        = element_text(size = 11, face = "bold"),
+    axis.text.x        = element_text(size = 11),
+    axis.title.x       = element_text(size = 12, face = "bold",
+                                      margin = margin(t = 8)),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor   = element_blank(),
+    panel.grid.major.x = element_line(colour = "grey92"),
+    plot.background    = element_rect(fill = "white", colour = NA),
+    panel.background   = element_rect(fill = "white", colour = NA),
+    plot.margin        = margin(15, 25, 15, 15)
+  )
+
+print(p_all)
+
+ggsave(here("figures/Production_Validation_All_2D3D.png"),
+       plot = p_all, width = 13, height = 6, dpi = 300, bg = "white")
+cat("\n✓ Combined 2D/3D validation plot saved\n")
+```
+

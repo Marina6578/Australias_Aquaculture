@@ -1,0 +1,1797 @@
+---
+title: "4_Marine_aquaculture with Marine-Only Filtering - WITH SPECIES"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com) and Simon Metcher
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+date: "first code28-01-2026 final code date on name 25feb 2026"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## ==============================================================================
+# AUSTRALIAN MARINE AQUACULTURE INFRASTRUCTURE DETECTION AND CLASSIFICATION
+# WITH MARINE-ONLY FILTERING FOR SA, WA, NT
+## ==============================================================================
+#
+# NOTES: SA, WA, and NT lease datasets contain BOTH marine and land-based
+# operations. This script filters to MARINE-ONLY before creating present/absent
+# status to avoid incorrectly marking land-based leases as "absent".
+#
+## ==============================================================================
+
+# Load packages
+```{r}
+library(tmaptools)
+library(gridExtra)
+library(cowplot)
+library(tidyverse)
+library(here)
+library(tmap)
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(viridisLite)
+library(stringr)
+library(purrr)
+```
+
+# ===== SPECIES CLASSIFICATION FUNCTIONS =====
+
+```{r}
+# === Your existing species dictionary ===
+species_groups <- list(
+  Molluscs = c(
+  "\\bgiant\\s*oyster\\b" = "Giant Oyster",
+  "\\brock\\s*oyster\\b" = "Rock Oyster",
+  "\\bsunshine\\s*oyster\\b" = "Sunshine Oyster (QSO)",
+  "\\bblue\\s*mussels?\\b" = "Blue Mussel",
+  "\\bmussels?\\b" = "Mussel",           # ← ADD THIS (after blue mussel, more specific first)
+  "\\bgreenlip\\s*abalone\\b" = "Greenlip Abalone",
+  "\\bblacklip\\s*abalone\\b" = "Blacklip Abalone",
+  "\\babalones?\\b" = "Abalone"
+),
+  Echinoderms = c(  "\\bsea\\s*cucumber\\b" = "Sea Cucumber"
+  ),
+  Fish = c(
+    "\\baustralian\\s*bass\\b" = "Australian Bass",
+    "\\bbarramundi\\b" = "Barramundi",
+    "\\bgolden\\s*perch\\b" = "Golden Perch",
+    "\\bmary\\s*river\\s*cod\\b" = "Mary River Cod",
+    "\\bsilver\\s*perch\\b" = "Silver Perch",
+    "\\bbrook\\s*trouts?\\b" = "Brook Trout",
+    "\\brainbow\\s*trouts?\\b" = "Rainbow Trout",
+    "\\bbrown\\s*trouts?\\b" = "Brown Trout",
+    "\\bsalmons?\\b" = "Salmon",
+    "\\bcobias?\\b" = "Cobia",
+    "\\bjade\\s*perch\\b" = "Jade Perch",
+    "\\bsouthern\\s*bluefin\\s*tunas?\\b" = "Southern Bluefin Tuna",
+    "\\byellowtail\\s*kingfish\\b" = "Yellowtail Kingfish",
+    "\\bsnappers?\\b" = "Snapper",
+    "\\bshort[- ]?fin\\s*eels?\\b" = "Shortfin Eel",
+    "\\blong[- ]?fin\\s*eels?\\b" = "Longfin Eel",
+    "\\bgrouper\\b" = "Grouper",
+    "\\bmurray\\s*cod\\b" = "Murray Cod",
+    "\\bcaviars?\\b" = "Caviar"
+  ),
+  Crustaceans = c(
+    "\\bred\\s*claw\\s*crayfish\\b" = "Red Claw Crayfish",
+    "\\bred\\s*claws?\\b" = "Red Claw Crayfish",
+    "\\bblack\\s*tiger\\s*prawns?\\b" = "Black Tiger Prawn",
+    "\\bkuruma\\s*prawns?\\b" = "Kuruma Prawn",
+    "\\bprawns?\\b" = "Prawn",
+    "\\bmud\\s*crabs?\\b" = "Mud Crab",
+    "\\baustralian\\s*bay\\s*lobster\\b" = "Australian Bay Lobster",
+    "\\bmoreton\\s*bay\\s*bugs?\\b" = "Australian Bay Lobster",
+    "\\blobsters?\\b" = "Lobster",
+    "\\byabb(?:y|ies)\\b" = "Yabby",
+    "\\bmarrons?\\b" = "Marron"
+  ),
+  Other = c(
+    "\\bhatchery\\b" = "Hatchery"
+  )
+)
+
+# Flatten patterns
+species_patterns <- purrr::flatten_chr(species_groups)
+
+# === Function to detect species from text fields ===
+detect_species <- function(text_vector) {
+  combined_text <- tolower(paste(text_vector, collapse = " "))
+  detected <- names(species_patterns)[str_detect(combined_text, 
+                                                   regex(names(species_patterns), 
+                                                         ignore_case = TRUE))]
+  
+  if(length(detected) > 0) {
+    return(paste(species_patterns[detected], collapse = "; "))
+  } else {
+    return(NA_character_)
+  }
+}
+
+# === Function to get species group ===
+get_species_group <- function(species_detected) {
+  if(is.na(species_detected)) return(NA_character_)
+  
+  groups <- character()
+  for(group_name in names(species_groups)) {
+    group_species <- species_groups[[group_name]]
+    if(any(str_detect(species_detected, fixed(group_species)))) {
+      groups <- c(groups, group_name)
+    }
+  }
+  
+  if(length(groups) > 0) {
+    return(paste(unique(groups), collapse = "; "))
+  } else {
+    return(NA_character_)
+  }
+}
+
+# === Vectorized function to format multiple species consistently ===
+format_multiple_species <- function(species_string) {
+  result <- ifelse(is.na(species_string), NA_character_, species_string)
+  
+  for(i in seq_along(result)) {
+    if(!is.na(result[i])) {
+      species_list <- str_split(result[i], ";\\s*")[[1]]
+      if(length(species_list) > 1) {
+        result[i] <- paste0("Multiple (", paste(species_list, collapse = ", "), ")")
+      }
+    }
+  }
+  
+  return(result)
+}
+
+message("✓ Species classification functions loaded")
+```
+
+# ===== MARINE SPECIES IDENTIFICATION =====
+
+```{r}
+# Define marine species groups for filtering
+marine_species_list <- c(
+  # Molluscs - all marine (oysters, mussels, abalone)
+  "oyster", "mussel", "abalone", "scallop", "clam",
+  #echinoderms (sea cucumber)
+  # Fish - marine only (avoid "salmon" alone due to color conflict)
+  "atlantic salmon", "chinook salmon", "salmon farm", "tuna", "kingfish", 
+  "barramundi", "snapper", "grouper", "cobia",
+  # Crustaceans - marine only
+  "prawn", "lobster", "crab", "bay bugs"
+)
+
+# Function to check if lease is marine based on species (VECTORIZED)
+is_marine_lease <- function(species_text, state = NULL) {
+  # Handle vectorized input
+  sapply(seq_along(species_text), function(i) {
+    sp <- species_text[i]
+    if(is.na(sp)) return(NA)
+    
+    species_lower <- tolower(sp)
+    
+    # PRIORITY 1: Explicit land-based indicators (immediate exclusion)
+    land_indicators <- c(
+      "landbased", "land-based", "land based",
+      "pond", "tank", "hatchery", "nursery",
+      "category a", "category b"  # SA land-based categories
+    )
+    
+    if(any(str_detect(species_lower, land_indicators))) {
+      return(FALSE)
+    }
+    
+    # PRIORITY 2: Land-based species (definite exclusions)
+    land_based_patterns <- c(
+      "red\\s*claw", "yabb", "marron", 
+      "murray\\s*cod", "silver\\s*perch", "golden\\s*perch",
+      "mary\\s*river", "australian\\s*bass",
+      "barramundi",  # Land-based except WA Cone Bay
+      "prawn",       # Land-based in Australia
+      "snapper"      # Not aquacultured in marine in Australia
+    )
+    
+    if(any(str_detect(species_lower, land_based_patterns))) {
+      return(FALSE)
+    }
+    
+    # PRIORITY 3: Definitely marine species ONLY
+    marine_patterns <- c(
+      "oyster", "mussel", "abalone", "scallop",
+      "atlantic\\s*salmon", "chinook\\s*salmon", "salmon\\s*farm", 
+      "tuna", "kingfish", 
+      "lobster", "crab", "bugs",
+      "sea\\s*cucumber", "pearl"
+    )
+    
+    if(any(str_detect(species_lower, marine_patterns))) {
+      return(TRUE)
+    }
+    
+    # If no clear indicator, return NA (conservative - needs manual check)
+    return(NA)
+  }, USE.NAMES = FALSE)
+}
+```
+
+# ===== STEP 1: LOAD OFFICIAL AQUACULTURE LEASE DATA =====
+
+```{r}
+library(sf)
+library(here)
+library(dplyr)
+
+read_infra <- function(path, crs = 3577) {
+  if (!file.exists(path)) {
+    return(NULL)
+  }
+  tryCatch({
+    st_read(path, quiet = TRUE) %>%
+      st_make_valid() %>%
+      st_transform(crs)
+  }, error = function(e) {
+    message(paste("Could not read", path))
+    return(NULL)
+  })
+}
+
+# ===== LOAD AUSTRALIAN BOUNDARIES =====
+message("Loading Australian boundary data...")
+
+AUS_states <- st_read(here("raw_data/AustralianStates_SHP/STE_2021_AUST_GDA2020.shp")) %>%
+  st_transform(3577) %>%
+  st_make_valid()
+
+# ===== LOAD OFFICIAL LEASES DATA =====
+message("\nLoading official leases data...")
+
+# Queensland - ALREADY MARINE ONLY
+QLD_marine_leases <- read_infra(here("output_data/QLD_marine_sites/qld_aquaculture_polygons_albers.shp"))
+
+# New South Wales - ALREADY MARINE ONLY
+NSW_marine_leases <- read_infra(here("raw_data/NSW/NSW_Aquaculture_leases_2025/Aquaculture_Leases.shp"))
+
+# South Australia - MIXED (needs filtering)
+SA_leases_raw <- read_infra(here("raw_data/SA/SA_AquacultureLeasesAndLicences_shp/AquacultureLeasesAndLicences_GDA2020.shp"))
+
+# Western Australia - MIXED (needs filtering)
+WA_leases_raw <- read_infra(here("raw_data/WA_Aquaculture_Sites/Aquaculture_Sites_DPIRD_001.shp"))
+
+# Tasmania - ALREADY MARINE ONLY
+TAS_marine_leases <- read_infra(here("raw_data/TAS/TAS_Aquaculture_leases/LIST_MARINE_LEASES_STATEWIDE/list_marine_leases_statewide.shp"))
+TAS_finfish_leases_raw <- read_infra(here("raw_data/TAS/TAS_Aquaculture_leases/TasmanianAquaculture_FinFisheries/TasmanianAquaculture_FinFisheries.shp"))
+
+# Northern Territory - MIXED (needs filtering)
+NT_leases_raw <- read_infra(here("raw_data/NT/NT_Aquaculture/map_aqua.geojson"))
+
+# Victoria - ALREADY MARINE ONLY
+VIC_marine_leases <- read_infra(here("raw_data/VIC/vic_aquaculture_features.shp"))
+```
+# =====1B Assign Salmon as a species to Tasmanian finfish leases (Jeremy Harte's dataset)
+```{r}
+# ===== TASMANIA: Assign Atlantic Salmon to finfish leases =====
+if (!is.null(TAS_marine_leases) && !is.null(TAS_finfish_leases_raw)) {
+  
+  message("\n=== Assigning Atlantic Salmon to TAS finfish leases ===")
+  
+  # Match finfish leases by ID or spatial intersection
+  if ("site_id" %in% names(TAS_marine_leases) && "site_id" %in% names(TAS_finfish_leases_raw)) {
+    # ID-based matching
+    finfish_ids <- unique(TAS_finfish_leases_raw$site_id)
+    
+   TAS_marine_leases <- TAS_marine_leases %>%
+  mutate(
+    species_original = if_else(site_id %in% finfish_ids, "Atlantic Salmon", NA_character_),
+    group_original = if_else(site_id %in% finfish_ids, "Fish", NA_character_)
+  )
+    
+    n_salmon <- sum(TAS_marine_leases$site_id %in% finfish_ids)
+    message(paste("  ✓ Assigned Atlantic Salmon to", n_salmon, "finfish leases"))
+    
+  } else {
+    # Spatial matching (slower but works without ID)
+    message("  Using spatial intersection...")
+    finfish_union <- st_union(TAS_finfish_leases_raw)
+    is_finfish <- st_intersects(TAS_marine_leases, finfish_union, sparse = FALSE)[,1]
+    
+    TAS_marine_leases <- TAS_marine_leases %>%
+      mutate(
+        species = if_else(is_finfish, "Atlantic Salmon", NA_character_),
+        group = if_else(is_finfish, "Fish", NA_character_)
+      )
+    
+    n_salmon <- sum(is_finfish)
+    message(paste("  ✓ Assigned Atlantic Salmon to", n_salmon, "finfish leases"))
+  }
+  
+  message(paste("  Remaining", nrow(TAS_marine_leases) - n_salmon, 
+                "TAS leases (likely shellfish - will use detection/patterns)"))
+}
+```
+# ===== STEP 2: EXTRACT SPECIES AND FILTER TO MARINE-ONLY =====
+
+
+```{r}
+# Function to extract and standardize species column
+extract_species_info <- function(df, state_name) {
+  if (is.null(df)) return(NULL)
+  
+  message(paste("Processing", state_name, "..."))
+  
+  # Find species column - check ALL possible variations #check each file and put here
+  species_cols <- c("species", "Species", "SPECIES", "cult_type", "species_type", 
+                    "SpeciesType", "Species_Custodian", "species_custodian","spcs","Species_Cu", "Spcs_Tp", "reg_type")
+  species_col <- species_cols[species_cols %in% names(df)]
+  
+  # Find group column
+  group_cols <- c("group", "Group", "GROUP")
+  group_col <- group_cols[group_cols %in% names(df)]
+  
+  # Find description column
+  desc_cols <- c("dscrptn", "description", "Description", "DESCRIPTION",
+                 "Locality", "locality", "Purpose", "purpose")
+  desc_col <- desc_cols[desc_cols %in% names(df)]
+  
+  # Create standardized columns - PRESERVE ORIGINALS!
+  if (length(species_col) > 0) {
+    species_col <- species_col[1]
+    message(paste("   ", state_name, "- Found species column:", species_col))
+    df$Species_Custodian <- as.character(df[[species_col]])
+    df$species_original <- as.character(df[[species_col]])  # ← PRESERVE!
+  } else {
+    message(paste("   ", state_name, "- No species column found"))
+    df$Species_Custodian <- NA_character_
+    df$species_original <- NA_character_
+  }
+  
+  if (length(group_col) > 0) {
+    group_col <- group_col[1]
+    df$group_original <- as.character(df[[group_col]])  # ← PRESERVE!
+  } else {
+    df$group_original <- NA_character_
+  }
+  
+  if (length(desc_col) > 0) {
+    desc_col <- desc_col[1]
+    message(paste("   ", state_name, "- Found description column:", desc_col))
+    df$dscrptn_original <- as.character(df[[desc_col]])  # ← PRESERVE!
+  } else {
+    df$dscrptn_original <- NA_character_
+  }
+  
+  return(df)
+}
+```
+
+```{r}
+# ===== STEP 2B: PROCESS AND FILTER MIXED DATASETS TO MARINE-ONLY =====
+
+message("\n=== EXTRACTING SPECIES AND FILTERING TO MARINE-ONLY ===")
+
+# Process SA (MIXED - needs filtering)
+if (!is.null(SA_leases_raw)) {
+  SA_leases_processed <- extract_species_info(SA_leases_raw, "South Australia")
+  
+  # Filter to marine-only
+  SA_leases <- SA_leases_processed %>%
+    mutate(is_marine = is_marine_lease(Species_Custodian)) %>%
+    filter(is_marine == TRUE | is.na(is_marine)) %>%  # Keep TRUE and uncertain (NA)
+    select(-is_marine)
+  
+  message(paste("  SA: Filtered from", nrow(SA_leases_raw), "to", nrow(SA_leases), "marine leases"))
+  message(paste("    Removed", nrow(SA_leases_raw) - nrow(SA_leases), "land-based leases"))
+} else {
+  SA_leases <- NULL
+}
+
+# Process WA (MIXED - needs filtering + special case for Cone Bay barramundi)
+if (!is.null(WA_leases_raw)) {
+  WA_leases_processed <- extract_species_info(WA_leases_raw, "Western Australia")
+  
+  # Filter to marine-only
+  WA_leases <- WA_leases_processed %>%
+    mutate(
+      is_marine = is_marine_lease(Species_Custodian),
+      # Special case: Cone Bay barramundi IS marine
+      is_marine = if_else(
+        str_detect(tolower(Species_Custodian), "cone bay") | 
+        str_detect(tolower(dscrptn_original), "cone bay"),
+        TRUE,
+        is_marine
+      )
+    ) %>%
+    filter(is_marine == TRUE | is.na(is_marine)) %>%
+    select(-is_marine) %>%
+    rename(region = location)  # ← Rename to avoid base R conflict
+  
+  message(paste("  WA: Filtered from", nrow(WA_leases_raw), "to", nrow(WA_leases), "marine leases"))
+  message(paste("    Removed", nrow(WA_leases_raw) - nrow(WA_leases), "land-based leases"))
+} else {
+  WA_leases <- NULL
+}
+
+# Process NT (MIXED - needs filtering)
+if (!is.null(NT_leases_raw)) {
+  NT_leases_processed <- extract_species_info(NT_leases_raw, "Northern Territory")
+  
+  # Filter to marine-only
+  NT_leases <- NT_leases_processed %>%
+    mutate(is_marine = is_marine_lease(Species_Custodian)) %>%
+    filter(is_marine == TRUE | is.na(is_marine)) %>%
+    select(-is_marine)
+  
+  message(paste("  NT: Filtered from", nrow(NT_leases_raw), "to", nrow(NT_leases), "marine leases"))
+  message(paste("    Removed", nrow(NT_leases_raw) - nrow(NT_leases), "land-based leases"))
+} else {
+  NT_leases <- NULL
+}
+
+# Process already-marine-only states (just extract species, no filtering)
+if (!is.null(QLD_marine_leases)) {
+  QLD_marine_leases <- extract_species_info(QLD_marine_leases, "Queensland")
+}
+
+if (!is.null(NSW_marine_leases)) {
+  NSW_marine_leases <- extract_species_info(NSW_marine_leases, "New South Wales")
+}
+
+if (!is.null(TAS_marine_leases)) {
+  TAS_marine_leases <- extract_species_info(TAS_marine_leases, "Tasmania")
+}
+
+if (!is.null(VIC_marine_leases)) {
+  VIC_marine_leases <- extract_species_info(VIC_marine_leases, "Victoria")
+}
+
+message("\n✓ Species extraction and marine filtering complete")
+```
+
+
+```{r}
+message("\n=== SUMMARY: SPECIES DATA IN ORIGINAL FILES ===")
+
+states_summary <- data.frame(
+  State = c("QLD", "NSW", "SA", "WA", "TAS", "NT", "VIC"),
+  Dataset = c(
+    if(!is.null(QLD_marine_leases)) nrow(QLD_marine_leases) else 0,
+    if(!is.null(NSW_marine_leases)) nrow(NSW_marine_leases) else 0,
+    if(!is.null(SA_leases)) nrow(SA_leases) else 0,
+    if(!is.null(WA_leases)) nrow(WA_leases) else 0,
+    if(!is.null(TAS_marine_leases)) nrow(TAS_marine_leases) else 0,
+    if(!is.null(NT_leases)) nrow(NT_leases) else 0,
+    if(!is.null(VIC_marine_leases)) nrow(VIC_marine_leases) else 0
+  ),
+  With_Species = c(
+    if(!is.null(QLD_marine_leases)) sum(!is.na(QLD_marine_leases$species_original) & QLD_marine_leases$species_original != "") else 0,
+    if(!is.null(NSW_marine_leases)) sum(!is.na(NSW_marine_leases$species_original) & NSW_marine_leases$species_original != "") else 0,
+    if(!is.null(SA_leases)) sum(!is.na(SA_leases$species_original) & SA_leases$species_original != "") else 0,
+    if(!is.null(WA_leases)) sum(!is.na(WA_leases$species_original) & WA_leases$species_original != "") else 0,
+    if(!is.null(TAS_marine_leases)) sum(!is.na(TAS_marine_leases$species_original) & TAS_marine_leases$species_original != "") else 0,
+    if(!is.null(NT_leases)) sum(!is.na(NT_leases$species_original) & NT_leases$species_original != "") else 0,
+    if(!is.null(VIC_marine_leases)) sum(!is.na(VIC_marine_leases$species_original) & VIC_marine_leases$species_original != "") else 0
+  )
+) %>%
+  mutate(Pct_Coverage = round((With_Species / Dataset) * 100, 1))
+
+print(states_summary)
+```
+
+# ===== STEP 3: CREATE COMBINED MARINE-ONLY LEASES =====
+
+```{r}
+message("\n=== CREATING COMBINED MARINE-ONLY LEASES LAYER ===")
+
+# **NOW USING FILTERED SA, WA, NT LEASES**
+# Note: species_original, group_original, dscrptn_original are created by extract_species_info()
+all_marine_leases <- bind_rows(
+  if (!is.null(QLD_marine_leases)) mutate(QLD_marine_leases, state_lease = "Queensland") else NULL,
+  if (!is.null(NSW_marine_leases)) mutate(NSW_marine_leases, state_lease = "New_South_Wales") else NULL,
+  if (!is.null(SA_leases)) mutate(SA_leases, state_lease = "South_Australia") else NULL,       # FILTERED
+  if (!is.null(WA_leases)) mutate(WA_leases, state_lease = "Western_Australia") else NULL,     # FILTERED
+  if (!is.null(TAS_marine_leases)) mutate(TAS_marine_leases, state_lease = "Tasmania") else NULL,
+  if (!is.null(NT_leases)) mutate(NT_leases, state_lease = "Northern_Territory") else NULL,    # FILTERED
+  if (!is.null(VIC_marine_leases)) mutate(VIC_marine_leases, state_lease = "Victoria") else NULL
+) %>%
+  mutate(lease_id = row_number()) %>%
+  select(lease_id, state_lease, Species_Custodian, species_original, group_original, region, dscrptn_original, geometry) %>%
+  st_make_valid()
+
+message(paste("✓ Combined MARINE-ONLY leases from", length(unique(all_marine_leases$state_lease)), "states"))
+message(paste("✓ Total marine leases:", nrow(all_marine_leases)))
+
+# Species coverage
+species_coverage <- all_marine_leases %>%
+  st_drop_geometry() %>%
+  summarise(
+    total = n(),
+    with_species = sum(!is.na(Species_Custodian)),
+    pct_with_species = round((with_species / total) * 100, 1)
+  )
+
+message("\nSpecies information coverage in marine leases:")
+print(species_coverage)
+
+# ===== FINFISH LEASES (marine-only) =====
+message("\nProcessing finfish leases...")
+
+if (!is.null(TAS_finfish_leases_raw) && nrow(TAS_finfish_leases_raw) > 0) {
+  TAS_finfish_marine <- TAS_finfish_leases_raw %>%
+    mutate(state_lease = "Tasmania") %>%
+    select(state_lease, geometry) %>%
+    st_make_valid()
+  message(paste("  TAS finfish marine:", nrow(TAS_finfish_marine)))
+} else {
+  TAS_finfish_marine <- NULL
+}
+# SA and WA finfish are mixed in main datasets - will extract after species classification
+all_finfish_marine_leases <- TAS_finfish_marine
+
+if (!is.null(all_finfish_marine_leases) && nrow(all_finfish_marine_leases) > 0) {
+  all_finfish_marine_leases <- all_finfish_marine_leases %>% st_make_valid()
+  message(paste("✓ Finfish MARINE leases (Tasmania only for now):", nrow(all_finfish_marine_leases)))
+  message("  Note: SA/WA finfish will be extracted after species classification in Step 8")
+}
+```
+
+# ===== STEP 4-6: LOAD AND CLASSIFY DETECTIONS =====
+#This step needs the detection made in Google Earth Engine to be done prior and be saved as vectors (in this case shp with the State acronym followed by Mapped.shp such as TAS_Mapped.shp and so on)
+#In this case we used satellite imagery from 2021 nd 2022 for the detections
+
+
+```{r}
+message("\n=== LOADING SSRG DETECTED INFRASTRUCTURE ===")
+
+ssrg_base_path <- here("output_data/Mariculture_Vectors")
+
+states_ssrg <- c(
+  QLD = "Queensland", NSW = "New_South_Wales", SA = "South_Australia",
+  WA = "Western_Australia", TAS = "Tasmania", NT = "Northern_Territory", VIC = "Victoria"
+)
+
+ssrg_infra <- list()
+
+for (abbrev in names(states_ssrg)) {
+  state_name <- states_ssrg[abbrev]
+  file_path <- file.path(ssrg_base_path, paste0(abbrev, "_Mapped.shp"))
+  
+  if (file.exists(file_path)) {
+    ssrg_infra[[state_name]] <- read_infra(file_path)
+    if (!is.null(ssrg_infra[[state_name]])) {
+      ssrg_infra[[state_name]]$State <- state_name
+      message(paste("  Loaded", state_name, ":", nrow(ssrg_infra[[state_name]]), "features"))
+    }
+  }
+}
+
+# Combine detections
+all_ssrg_detections_list <- list()
+for (st in names(ssrg_infra)) {
+  if (!is.null(ssrg_infra[[st]])) {
+    temp_df <- ssrg_infra[[st]] %>%
+      select(State, Infra_type, geometry) %>%
+      st_make_valid()
+    all_ssrg_detections_list[[length(all_ssrg_detections_list) + 1]] <- temp_df
+  }
+}
+
+if (length(all_ssrg_detections_list) > 0) {
+  all_ssrg_detections_raw <- do.call(rbind, all_ssrg_detections_list)
+  message(paste("✓ Total raw detections:", nrow(all_ssrg_detections_raw)))
+} else {
+  all_ssrg_detections_raw <- NULL
+}
+
+# Filter to marine leases
+if (!is.null(all_ssrg_detections_raw)) {
+  all_ssrg_detections_marine <- st_intersection(
+    all_ssrg_detections_raw %>% st_make_valid(),
+    all_marine_leases %>% st_union() %>% st_make_valid()
+  ) %>%
+    mutate(
+      area_m2 = st_area(geometry),
+      area_km2 = as.numeric(area_m2) / 1e6,
+      infrastructure_type = case_when(
+        tolower(Infra_type) %in% c("cage", "cages", "pen", "pens") ~ "Finfish (Cages)",
+        tolower(Infra_type) %in% c("longline", "longlines", "line", "lines") ~ "Shellfish (Longlines)",
+        TRUE ~ "Unknown"
+      )
+    )
+  
+  message(paste("✓ Marine detections:", nrow(all_ssrg_detections_marine)))
+}
+```
+
+# ===== STEP 7: CREATE PRESENT/ABSENT STATUS =====
+
+```{r}
+message("\n=== CREATING PRESENT/ABSENT STATUS FOR MARINE-ONLY LEASES ===")
+
+if (!is.null(all_marine_leases) && !is.null(all_ssrg_detections_marine)) {
+  
+  leases_with_detections <- st_intersection(
+    all_marine_leases %>% select(lease_id, state_lease, geometry),
+    all_ssrg_detections_marine %>% select(geometry)
+  ) %>%
+    st_drop_geometry() %>%
+    distinct(lease_id) %>%
+    mutate(has_detection = TRUE)
+  
+  all_marine_leases_with_status <- all_marine_leases %>%
+    left_join(leases_with_detections, by = "lease_id") %>%
+    mutate(
+      has_detection = replace_na(has_detection, FALSE),
+      Infra_status = case_when(
+        has_detection == TRUE ~ "present",
+        has_detection == FALSE ~ "absent",
+        TRUE ~ "unknown"
+      ),
+      status_label = case_when(
+        Infra_status == "present" ~ "Present (Infrastructure Detected)",
+        Infra_status == "absent" ~ "Absent (No Infrastructure)",
+        TRUE ~ "Unknown Status"
+      )
+    )
+  
+  status_summary <- all_marine_leases_with_status %>%
+    st_drop_geometry() %>%
+    count(state_lease, Infra_status)
+  
+  message("\n✓ Present/Absent status (MARINE-ONLY):")
+  print(status_summary)
+  
+  all_ssrg_detections_marine <- all_ssrg_detections_marine %>%
+    mutate(
+      Infra_status = "present",
+      status_label = "Present (Infrastructure Detected)"
+    )
+}
+```
+
+
+# ===== STEP 8: SPECIES & GROUP ASSIGNMENT WITH PRIORITY CASCADE =====
+
+```{r}
+
+# Strategy: Preserve original species data → Use detection → Use groups → Use regional patterns
+message("\n=== STEP 8: SPECIES & GROUP CLASSIFICATION (PRIORITY CASCADE) ===")
+
+if (!is.null(all_marine_leases_with_status)) {
+  
+  all_marine_leases_with_status <- all_marine_leases_with_status %>%
+    rowwise() %>%
+    mutate(
+      # --- STEP A: Try to detect species from text fields ---
+      text_for_detection = paste(
+        ifelse(!is.na(Species_Custodian), Species_Custodian, ""),
+        ifelse(!is.na(dscrptn_original), dscrptn_original, ""),
+              sep = " "
+      ),
+      Species_detected = detect_species(text_for_detection),
+      
+      # ========== GROUP ASSIGNMENT (Priority Cascade) ==========
+      Group = case_when(
+        # PRIORITY 1: Keep original group data (QLD, NT, VIC have this)
+        !is.na(group_original) & group_original != "" ~ group_original,
+        
+        # PRIORITY 2: Get group from detected species
+        !is.na(Species_detected) ~ get_species_group(Species_detected),
+        
+        # PRIORITY 3: Assign based on state production patterns (ABARES data)
+        state_lease == "New_South_Wales" ~ "Molluscs",  # >95% oysters
+        state_lease == "Tasmania" ~ "Molluscs",  # Default (will refine for salmon below)
+        state_lease == "South_Australia" ~ "Molluscs",  # Mostly oysters, some tuna
+        state_lease == "Western_Australia" ~ "Molluscs",  # Pearls/oysters
+        state_lease == "Victoria" ~ "Molluscs",  # Mussels
+        
+        # PRIORITY 4: Default fallback
+        TRUE ~ "Molluscs"
+      ),
+      
+      # ========== SPECIES ASSIGNMENT (Priority Cascade) ==========
+      Species_verified = case_when(
+        # PRIORITY 1: Keep original species data (QLD has 438, NT has 16)
+        !is.na(species_original) & species_original != "" ~ species_original,
+        
+        # PRIORITY 2: Use detected species
+        !is.na(Species_detected) ~ format_multiple_species(Species_detected),
+        
+        # PRIORITY 3: Assign based on state production patterns
+        # NSW: Predominantly Sydney Rock Oyster
+        state_lease == "New_South_Wales" & Group == "Molluscs" ~ 
+          "Sydney Rock Oyster (predominant)",
+        
+        # Tasmania: Salmon for finfish, shellfish for others
+        state_lease == "Tasmania" & Group == "Fish" ~ 
+          "Atlantic Salmon",
+        state_lease == "Tasmania" & Group == "Molluscs" ~ 
+          "Pacific Oyster or Blue Mussel",
+        
+               # South Australia: Mixed (tuna/kingfish if fish, oysters if Molluscs)
+state_lease == "South_Australia" & Group == "Fish" ~ 
+  "Southern Bluefin Tuna or Yellowtail Kingfish",
+state_lease == "South_Australia" & Group == "Molluscs" ~ 
+  "Pacific Oyster",
+        
+        # Western Australia: Cone Bay barramundi if detected, otherwise pearls/oysters
+# Western Australia: Use location to assign species
+state_lease == "Western_Australia" & 
+  str_detect(region, regex("cone bay", ignore_case = TRUE)) ~ 
+  "Barramundi (Cone Bay - Marine)",
+
+state_lease == "Western_Australia" & 
+  str_detect(region, regex("albany|oyster harbour", ignore_case = TRUE)) ~ 
+  "Edible Oyster (Albany/Oyster Harbour)",
+
+state_lease == "Western_Australia" ~ 
+  "Pearl Oyster or Rock Oyster",
+        
+        # Victoria: Predominantly Blue Mussels
+        state_lease == "Victoria" ~ 
+          "Blue Mussel",
+        
+        # PRIORITY 4: Use group as fallback (better than nothing!)
+        !is.na(Group) & Group != "" ~ paste0(Group, " (unspecified)"),
+        
+        TRUE ~ NA_character_
+      )
+    ) %>%
+    ungroup()  # ← UNGROUP AFTER all assignments are done
+  
+  
+  # --- SUMMARY STATISTICS ---
+  
+  species_summary <- all_marine_leases_with_status %>%
+    st_drop_geometry() %>%
+    summarise(
+      total_leases = n(),
+      # Original data coverage
+      from_original_species = sum(!is.na(species_original) & species_original != ""),
+      from_original_group = sum(!is.na(group_original) & group_original != ""),
+      # Detection
+      species_detected = sum(!is.na(Species_detected)),
+      # Final coverage
+      final_with_group = sum(!is.na(Group) & Group != ""),
+      final_with_species = sum(!is.na(Species_verified) & Species_verified != ""),
+      # Percentages
+      pct_group = round((final_with_group / total_leases) * 100, 1),
+      pct_species = round((final_with_species / total_leases) * 100, 1)
+    )
+  
+  message("\n✓✓✓ SPECIES CLASSIFICATION SUMMARY ✓✓✓")
+  print(species_summary)
+  
+  # Breakdown by state
+  state_summary <- all_marine_leases_with_status %>%
+    st_drop_geometry() %>%
+    group_by(state_lease) %>%
+    summarise(
+      total = n(),
+      had_original_species = sum(!is.na(species_original) & species_original != ""),
+      had_original_group = sum(!is.na(group_original) & group_original != ""),
+      detected = sum(!is.na(Species_detected)),
+      final_species = sum(!is.na(Species_verified) & Species_verified != ""),
+      final_group = sum(!is.na(Group) & Group != ""),
+      .groups = "drop"
+    )
+  
+  message("\n✓ Data source breakdown by state:")
+  print(state_summary)
+  
+  # Distribution by group and status
+  group_summary <- all_marine_leases_with_status %>%
+    st_drop_geometry() %>%
+    group_by(Group, Infra_status) %>%
+    summarise(n_leases = n(), .groups = "drop") %>%
+    arrange(Group, Infra_status)
+  
+  message("\n✓ Group distribution by infrastructure status:")
+  print(group_summary)
+  
+  # Sample of Species_verified values
+  message("\n✓ Sample Species_verified values:")
+  sample_species <- all_marine_leases_with_status %>%
+    st_drop_geometry() %>%
+    filter(!is.na(Species_verified)) %>%
+    count(Species_verified, sort = TRUE) %>%
+    head(10)
+  print(sample_species)
+}
+# ===== STANDARDIZE OYSTER NAMES FOR PRODUCTION MODELING =====
+
+message("\n=== STANDARDIZING OYSTER and other species names FOR PRODUCTION ANALYSIS ===")
+
+if (!is.null(all_marine_leases_with_status)) {
+  
+  # Count before standardization
+  oyster_before <- all_marine_leases_with_status %>%
+    st_drop_geometry() %>%
+    filter(str_detect(Species_verified, regex("oyster", ignore_case = TRUE))) %>%
+    count(Species_verified, sort = TRUE)
+  
+  message("\nOyster species BEFORE standardization:")
+  print(oyster_before)
+  
+ # Standardize species names
+all_marine_leases_with_status <- all_marine_leases_with_status %>%
+  mutate(
+    # PASS 1: Strip "Production Lease (...)" wrappers
+    Species_clean = if_else(
+      str_detect(Species_verified, regex("^Production Lease \\(", ignore_case = TRUE)),
+      str_replace(Species_verified, "^Production Lease \\((.+)\\)$", "\\1"),
+      Species_verified
+    ),
+    
+    # PASS 2: Standardize using cleaned names
+    Species_standardized = case_when(
+      str_detect(Species_clean, regex("pearl", ignore_case = TRUE)) ~ 
+        "Pearl Oyster (non-food)",
+      
+      str_detect(Species_clean, regex("oyster|\\bqso\\b", ignore_case = TRUE)) ~ 
+        "Edible Oyster (aggregated)",
+      
+      state_lease == "South_Australia" & 
+        str_detect(Species_clean, regex("appl", ignore_case = TRUE)) &
+        Group == "Molluscs" ~
+        "Edible Oyster (aggregated)",
+      
+      str_detect(Species_clean, regex("mussel", ignore_case = TRUE)) ~ 
+        "Mussel (aggregated)",
+      
+      str_detect(Species_clean, regex("tuna", ignore_case = TRUE)) ~ 
+        "Southern Bluefin Tuna (aggregated)",
+      
+      TRUE ~ Species_clean
+    )
+  )
+  
+  # Count after standardization
+  oyster_after <- all_marine_leases_with_status %>%
+    st_drop_geometry() %>%
+    filter(str_detect(Species_standardized, regex("oyster", ignore_case = TRUE))) %>%
+    count(Species_standardized, sort = TRUE)
+  
+  message("\nOyster species AFTER standardization:")
+  print(oyster_after)
+  
+  # Summary of aggregation (area will be calculated later)
+food_oyster_count <- all_marine_leases_with_status %>%
+  st_drop_geometry() %>%
+  filter(Species_standardized == "Edible Oyster (aggregated)") %>%
+  summarise(
+    n_leases = n()
+  )
+
+message("\n✓ Aggregated food oyster leases:")
+print(food_oyster_count)
+message("  (Area calculations will appear in the detailed summary below)")
+  
+
+}
+```
+# CALCULATE DETECTED INFRASTRUCTURE AREA BY SPECIES (NATIONAL & STATE) informs:
+
+1. **National summary** - Total infrastructure km² for each species across Australia
+2. **State breakdown** - Infrastructure km² for each species in each state  
+3. **With infrastructure type** - Separates cages vs longlines
+4. **Without infrastructure type** - Simplified totals
+5. **Key species highlights** - Quick view of oysters, salmon, tuna, mussels
+6. **CSV exports** - All tables saved for further analysis#
+##save shp and gpkg
+```{r}
+# ===== CALCULATE DETECTED INFRASTRUCTURE AREA BY SPECIES (NATIONAL & STATE) =====
+
+message("\n=== CALCULATING DETECTED INFRASTRUCTURE BY SPECIES ===")
+all_ssrg_detections_marine <- all_ssrg_detections_marine %>%
+  mutate(detection_id = row_number())
+
+if (!is.null(all_marine_leases_with_status) && !is.null(all_ssrg_detections_marine)) {
+  
+  # Intersect ALL detections with ALL leases (with species info)
+  #  Assign each detection to ONE lease (largest overlap) =====
+
+infrastructure_with_species <- st_intersection(
+  all_ssrg_detections_marine %>% st_make_valid(),
+  all_marine_leases_with_status %>% 
+    select(lease_id, state_lease, Species_standardized, Group) %>% 
+    st_make_valid()
+) %>%
+  mutate(
+    overlap_area = as.numeric(st_area(geometry))
+  ) %>%
+  # Keep only the lease with the largest overlap per detection
+  group_by(detection_id) %>%  # ← adjust to your actual detection ID column
+  slice_max(overlap_area, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(
+    # Use ORIGINAL detection area, not intersection fragment
+    infra_area_km2 = as.numeric(area_km2)  # from the SSRG detection layer
+  )
+  # Reclassify WA oyster area misdetected as cages
+infrastructure_with_species <- infrastructure_with_species %>%
+  mutate(
+    infrastructure_type = if_else(
+      State == "Western_Australia" & 
+        Species_standardized != "Barramundi (Cone Bay - Marine)" & 
+        infrastructure_type == "Finfish (Cages)",
+      "Shellfish (Longlines)",
+      infrastructure_type
+    )
+  )
+  message(paste("\n✓ Total infrastructure detections matched to species:", nrow(infrastructure_with_species)))
+  
+  # ===== NATIONAL SUMMARY BY SPECIES =====
+  
+  national_by_species <- infrastructure_with_species %>%
+    st_drop_geometry() %>%
+    group_by(Species_standardized, infrastructure_type) %>%
+    summarise(
+      n_detections = n(),
+      total_infra_km2 = round(sum(infra_area_km2, na.rm = TRUE),3),
+      .groups = 'drop'
+    ) %>%
+    arrange(desc(total_infra_km2))
+  
+  message("\n✓✓✓ NATIONAL INFRASTRUCTURE AREA BY SPECIES:")
+  print(national_by_species, n = 30)
+  
+  # ===== STATE BREAKDOWN BY SPECIES =====
+  
+  state_by_species <- infrastructure_with_species %>%
+    st_drop_geometry() %>%
+    group_by(state_lease, Species_standardized, infrastructure_type) %>%
+    summarise(
+      n_detections = n(),
+      total_infra_km2 = round(sum(infra_area_km2, na.rm = TRUE),3),
+      .groups = 'drop'
+    ) %>%
+    arrange(state_lease, desc(total_infra_km2))
+  
+  message("\n✓✓✓ STATE BREAKDOWN - INFRASTRUCTURE AREA BY SPECIES:")
+  print(state_by_species, n = 50)
+  
+  # ===== SIMPLIFIED SUMMARIES (without infrastructure type split) =====
+  
+  # National totals by species (aggregated across infrastructure types)
+  national_species_totals <- infrastructure_with_species %>%
+    st_drop_geometry() %>%
+    group_by(Species_standardized) %>%
+    summarise(
+      n_detections = n(),
+      total_infra_km2 = round(sum(infra_area_km2, na.rm = TRUE),3),
+      .groups = 'drop'
+    ) %>%
+    arrange(desc(total_infra_km2))
+  
+  message("\n✓✓ SIMPLIFIED NATIONAL TOTALS (all infrastructure types combined):")
+  print(national_species_totals, n = 30)
+  
+  # State totals by species (aggregated across infrastructure types)
+  state_species_totals <- infrastructure_with_species %>%
+    st_drop_geometry() %>%
+    group_by(state_lease, Species_standardized) %>%
+    summarise(
+      n_detections = n(),
+      total_infra_km2 = round(sum(infra_area_km2, na.rm = TRUE),3),
+      .groups = 'drop'
+    ) %>%
+    arrange(state_lease, desc(total_infra_km2))
+  
+  message("\n✓✓ SIMPLIFIED STATE BREAKDOWN (all infrastructure types combined):")
+  print(state_species_totals, n = 50)
+  
+  # ===== KEY SPECIES HIGHLIGHTS =====
+  
+  message("\n=== KEY SPECIES HIGHLIGHTS ===")
+  
+  # Edible Oysters
+  oyster_summary <- national_species_totals %>%
+    filter(Species_standardized == "Edible Oyster (aggregated)")
+  
+  if (nrow(oyster_summary) > 0) {
+    message(sprintf("\n✓ EDIBLE OYSTERS: %.4f km² detected nationally", oyster_summary$total_infra_km2))
+    
+    oyster_by_state <- state_species_totals %>%
+      filter(Species_standardized == "Edible Oyster (aggregated)")
+    print(oyster_by_state)
+  }
+  
+  # Atlantic Salmon
+  salmon_summary <- national_species_totals %>%
+    filter(str_detect(Species_standardized, regex("atlantic salmon", ignore_case = TRUE)))
+  
+  if (nrow(salmon_summary) > 0) {
+    message(sprintf("\n✓ ATLANTIC SALMON: %.4f km² detected nationally", sum(salmon_summary$total_infra_km2)))
+    
+    salmon_by_state <- state_species_totals %>%
+      filter(str_detect(Species_standardized, regex("atlantic salmon", ignore_case = TRUE)))
+    print(salmon_by_state)
+  }
+  
+  # Tuna
+  tuna_summary <- national_species_totals %>%
+    filter(str_detect(Species_standardized, regex("tuna", ignore_case = TRUE)))
+  
+  if (nrow(tuna_summary) > 0) {
+    message(sprintf("\n✓ TUNA: %.4f km² detected nationally", sum(tuna_summary$total_infra_km2)))
+    
+    tuna_by_state <- state_species_totals %>%
+      filter(str_detect(Species_standardized, regex("tuna", ignore_case = TRUE)))
+    print(tuna_by_state)
+  }
+  
+  # Blue Mussels
+  mussel_summary <- national_species_totals %>%
+    filter(str_detect(Species_standardized, regex("mussel", ignore_case = TRUE)))
+  
+  if (nrow(mussel_summary) > 0) {
+    message(sprintf("\n✓ BLUE MUSSELS: %.4f km² detected nationally", sum(mussel_summary$total_infra_km2)))
+    
+    mussel_by_state <- state_species_totals %>%
+      filter(str_detect(Species_standardized, regex("mussel", ignore_case = TRUE)))
+    print(mussel_by_state)
+  }
+  
+  # ===== SAVE DETAILED RESULTS =====
+  
+  output_dir <- here("output_data/infrastructure_by_species")
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  write.csv(national_by_species, 
+            file.path(output_dir, "national_infrastructure_by_species.csv"), 
+            row.names = FALSE)
+  
+  write.csv(state_by_species, 
+            file.path(output_dir, "state_infrastructure_by_species.csv"), 
+            row.names = FALSE)
+  
+  write.csv(national_species_totals, 
+            file.path(output_dir, "national_species_totals.csv"), 
+            row.names = FALSE)
+  
+  write.csv(state_species_totals, 
+            file.path(output_dir, "state_species_totals.csv"), 
+            row.names = FALSE)
+  
+  message("\n✓✓✓ CSV files saved to:", output_dir)
+}
+
+# ===== SAVE INFRASTRUCTURE WITH SPECIES AS SPATIAL FILE =====
+  
+  # Save as GeoPackage (recommended - handles long column names, single file)
+  infra_gpkg_path <- file.path(output_dir, "infrastructure_with_species.gpkg")
+  st_write(
+    infrastructure_with_species,
+    infra_gpkg_path,
+    delete_dsn = TRUE,
+    quiet = FALSE
+  )
+  message(paste("  ✓ Saved infrastructure_with_species GeoPackage:", nrow(infrastructure_with_species), "features"))
+  
+  # Also save as CSV (without geometry, for easy inspection)
+  infrastructure_with_species %>%
+    st_drop_geometry() %>%
+    write.csv(file.path(output_dir, "infrastructure_with_species.csv"), row.names = FALSE)
+  message("  ✓ Saved infrastructure_with_species CSV")
+```
+
+
+#extracting SA and WA finfish leases
+
+
+```{r}
+# ===== EXTRACT SA/WA FINFISH =====
+message("\n=== EXTRACTING FINFISH LEASES FROM SA/WA MAIN DATASETS ===")
+if (!is.null(all_marine_leases_with_status)) {
+  
+  # Extract SA finfish
+  SA_finfish_from_leases <- all_marine_leases_with_status %>%
+    filter(state_lease == "South_Australia" & Group == "Fish") %>%
+    select(state_lease, Species_standardized, Group, geometry) %>%
+    st_make_valid()
+  
+  if (nrow(SA_finfish_from_leases) > 0) {
+    message(paste("  ✓ SA finfish extracted:", nrow(SA_finfish_from_leases)))
+    SA_finfish_marine <- SA_finfish_from_leases
+  } else {
+    SA_finfish_marine <- NULL
+  }
+  
+  # Extract WA finfish
+  WA_finfish_from_leases <- all_marine_leases_with_status %>%
+    filter(state_lease == "Western_Australia" & Group == "Fish") %>%
+    select(state_lease, Species_standardized, Group, geometry) %>%
+    st_make_valid()
+  
+  if (nrow(WA_finfish_from_leases) > 0) {
+    message(paste("  ✓ WA finfish extracted:", nrow(WA_finfish_from_leases)))
+    WA_finfish_marine <- WA_finfish_from_leases
+  } else {
+    WA_finfish_marine <- NULL
+  }
+  
+  # Update combined finfish leases
+  all_finfish_marine_leases <- bind_rows(
+    TAS_finfish_marine,
+    SA_finfish_marine,
+    WA_finfish_marine
+  )
+  
+  if (!is.null(all_finfish_marine_leases) && nrow(all_finfish_marine_leases) > 0) {
+    message(paste("\n✓✓ FINAL finfish leases:", nrow(all_finfish_marine_leases)))
+    
+    # Summary by state
+    finfish_by_state <- all_finfish_marine_leases %>%
+      st_drop_geometry() %>%
+      count(state_lease)
+    message("\nFinfish leases by state:")
+    print(finfish_by_state)
+  }
+}
+
+```
+
+# ===== VERIFICATION =====
+
+```{r}
+if (!is.null(all_marine_leases_with_status)) {
+  message("\n=== VERIFICATION: MARINE-ONLY FILTERING ===")
+  
+  message("\nFinal columns:")
+  print(names(all_marine_leases_with_status))
+  
+  message("\n✓✓✓ CRITICAL CHECKS PASSED ✓✓✓")
+  message("  ✓ SA, WA, NT filtered to marine-only leases")
+  message("  ✓ Infra_status: present/absent (marine leases only)")
+  message("  ✓ Species_verified and Group added")
+  message("  ✓ No land-based leases marked as 'absent'")
+  
+  # Show filtering impact
+  message("\nFiltering impact by state:")
+  state_counts <- all_marine_leases_with_status %>%
+    st_drop_geometry() %>%
+    count(state_lease) %>%
+    arrange(desc(n))
+  print(state_counts)
+}
+```
+
+
+# ===== EXPORT SHAPEFILE FOR USE IN OTHER MAPS =====
+
+```{r}
+if (!is.null(all_marine_leases_with_status)) {
+  
+  message("\n=== SAVING all_marine_leases_with_status AS SHAPEFILE ===")
+  
+  # Check geometry types
+  geom_types <- st_geometry_type(all_marine_leases_with_status)
+  message("\nGeometry types in dataset:")
+  print(table(geom_types))
+  
+  # Filter to only POLYGON and MULTIPOLYGON (shapefiles can't mix geometry types)
+  all_marine_leases_polygons <- all_marine_leases_with_status %>%
+    filter(st_geometry_type(geometry) %in% c("POLYGON", "MULTIPOLYGON"))
+  
+  message(paste("\n✓ Filtered from", nrow(all_marine_leases_with_status), 
+                "to", nrow(all_marine_leases_polygons), "polygon features"))
+  
+  if (nrow(all_marine_leases_with_status) > nrow(all_marine_leases_polygons)) {
+  removed <- nrow(all_marine_leases_with_status) - nrow(all_marine_leases_polygons)
+  message(paste("  Removed", removed, "non-polygon features (likely POINT or LINESTRING)"))
+}
+  
+  # Save the main file to output_data/
+  output_path <- here("output_data/all_marine_leases_with_status.shp")
+  
+  st_write(
+    all_marine_leases_polygons,
+    output_path,
+    delete_dsn = TRUE,  # Overwrite if exists
+    quiet = FALSE
+  )
+  
+  message("\n✓✓✓ SHAPEFILE SAVED ✓✓✓")
+  message(paste("  Location:", output_path))
+  message(paste("  Features:", nrow(all_marine_leases_polygons), "marine lease polygons"))
+  message("\n  Columns included:")
+  for (col in names(all_marine_leases_polygons)) {
+    message(paste("    -", col))
+  }
+  
+  # Also create a subfolder with additional exports
+  output_dir <- here("output_data/Active_Inactive_Leases_With_Species")
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
+  }
+  
+  # Export present leases only
+  present_leases <- all_marine_leases_polygons %>%
+    filter(Infra_status == "present")
+  
+  st_write(
+    present_leases,
+    file.path(output_dir, "Present_Marine_Leases.shp"),
+    delete_dsn = TRUE,
+    quiet = TRUE
+  )
+  
+  message(paste("\n✓ Also saved:", nrow(present_leases), "present leases"))
+  
+  # Export absent leases only
+  absent_leases <- all_marine_leases_polygons %>%
+    filter(Infra_status == "absent")
+  
+  st_write(
+    absent_leases,
+    file.path(output_dir, "Absent_Marine_Leases.shp"),
+    delete_dsn = TRUE,
+    quiet = TRUE
+  )
+  
+  message(paste("✓ Also saved:", nrow(absent_leases), "absent leases"))
+  
+  # Export by species group
+  if (any(!is.na(all_marine_leases_polygons$Group))) {
+    
+    # Export each group separately
+    for (group_name in unique(all_marine_leases_polygons$Group[!is.na(all_marine_leases_polygons$Group)])) {
+      group_leases <- all_marine_leases_polygons %>%
+        filter(Group == group_name)
+      
+      # Clean filename (remove spaces and special characters)
+      clean_name <- gsub("[^A-Za-z0-9]", "_", group_name)
+      
+      st_write(
+        group_leases,
+        file.path(output_dir, paste0(clean_name, "_Leases.shp")),
+        delete_dsn = TRUE,
+        quiet = TRUE
+      )
+      
+      message(paste("✓ Also saved:", nrow(group_leases), group_name, "leases"))
+    }
+  }
+  
+  # Export the detections (also filter to polygons)
+  if (!is.null(all_ssrg_detections_marine)) {
+    detections_polygons <- all_ssrg_detections_marine %>%
+      filter(st_geometry_type(geometry) %in% c("POLYGON", "MULTIPOLYGON"))
+    
+    st_write(
+      detections_polygons,
+      file.path(output_dir, "Detected_Infrastructure_Marine.shp"),
+      delete_dsn = TRUE,
+      quiet = TRUE
+    )
+    
+    message(paste("✓ Also saved:", nrow(detections_polygons), "infrastructure detections"))
+  }
+  
+  message("\n=== ALL FILES SAVED ===")
+  message("Main shapefile: output_data/all_marine_leases_with_status.shp")
+  message("Additional exports: output_data/Active_Inactive_Leases_With_Species/")
+  
+  # Summary of what was filtered out
+  if (nrow(all_marine_leases_with_status) > nrow(all_marine_leases_polygons)) {
+    message("\n⚠ NOTE: Some features were excluded from shapefiles:")
+    non_polygon_types <- geom_types[!geom_types %in% c("POLYGON", "MULTIPOLYGON")]
+    if (length(non_polygon_types) > 0) {
+      message("  Non-polygon types removed:")
+      print(table(non_polygon_types))
+      message("  (Shapefiles can only contain one geometry type)")
+    }
+  }
+  
+} else {
+  message("ERROR: all_marine_leases_with_status is NULL - cannot export")
+}
+```
+# =====  CALCULATE AREAS BY TYPE AND STATE TO USE IN THE DISTRIBUTION MODEL with infrastructure type SSRG=====
+#all_marine_leases_with_status
+```{r}
+message("\n=== CALCULATING AREAS (MARINE LEASES WITH STATUS) ===")
+if (!is.null(all_marine_leases_with_status)) {
+  
+  # Calculate area if not already present
+  if (!"area_km2" %in% names(all_marine_leases_with_status)) {
+    all_marine_leases_with_status <- all_marine_leases_with_status %>%
+      mutate(area_km2 = as.numeric(st_area(geometry)) / 1e6)
+    message("Calculated area_km2 from geometry")
+  }
+  
+  # Overall summary by state, infrastructure status, group, and species
+  leases_detailed_summary <- all_marine_leases_with_status %>%
+    st_drop_geometry() %>%
+    group_by(state_lease, Infra_status, Group, Species_standardized) %>%
+    summarise(
+      n_leases = n(),
+      total_area_km2 = round(sum(area_km2, na.rm = TRUE), 3),
+      .groups = 'drop'
+    ) %>%
+    arrange(state_lease, Infra_status, Group, Species_standardized)
+  
+  message("\nLEASES SUMMARY BY STATE, STATUS, GROUP, AND SPECIES:")
+  print(leases_detailed_summary)
+  
+  # Summary by state and infrastructure status (no species - unchanged)
+  leases_state_status_summary <- all_marine_leases_with_status %>%
+    st_drop_geometry() %>%
+    group_by(state_lease, Infra_status) %>%
+    summarise(
+      n_leases = n(),
+      total_area_km2 = round(sum(area_km2, na.rm = TRUE), 3),
+            .groups = 'drop'
+    ) %>%
+    arrange(state_lease, Infra_status)
+  
+  message("\nLEASES SUMMARY BY STATE AND INFRASTRUCTURE STATUS:")
+  print(leases_state_status_summary)
+  
+  # Summary by group and species (across all states)
+  leases_group_species_summary <- all_marine_leases_with_status %>%
+    st_drop_geometry() %>%
+    group_by(Group, Species_standardized) %>%
+    summarise(
+      n_leases = n(),
+      total_area_km2 = round(sum(area_km2, na.rm = TRUE), 3),
+      .groups = 'drop'
+    ) %>%
+    arrange(Group, Species_standardized)
+  
+  message("\nLEASES SUMMARY BY GROUP AND SPECIES:")
+  print(leases_group_species_summary)
+  
+  # State totals (no species - unchanged)
+  leases_state_summary <- all_marine_leases_with_status %>%
+    st_drop_geometry() %>%
+    group_by(state_lease) %>%
+    summarise(
+      n_leases = n(),
+      total_area_km2 = round(sum(area_km2, na.rm = TRUE), 3),
+      .groups = 'drop'
+    )
+  
+  message("\nSTATE TOTALS:")
+  print(leases_state_summary)
+  
+  # Infrastructure status totals (no species - unchanged)
+  leases_status_summary <- all_marine_leases_with_status %>%
+    st_drop_geometry() %>%
+    group_by(Infra_status) %>%
+    summarise(
+      n_leases = n(),
+      total_area_km2 = round(sum(area_km2, na.rm = TRUE), 3),
+      .groups = 'drop'
+    )
+  
+  message("\nINFRASTRUCTURE STATUS TOTALS:")
+  print(leases_status_summary)
+  
+  # Summary for leases WITH infrastructure (present)
+  leases_present_summary <- all_marine_leases_with_status %>%
+    filter(Infra_status == "present") %>%
+    st_drop_geometry() %>%
+    group_by(state_lease, Group, Species_standardized) %>%
+    summarise(
+      n_leases = n(),
+     total_area_km2 = round(sum(area_km2, na.rm = TRUE), 3),
+      .groups = 'drop'
+    ) %>%
+    arrange(state_lease, Group, Species_standardized)
+  
+  message("\nLEASES WITH INFRASTRUCTURE PRESENT:")
+  print(leases_present_summary)
+  
+  # Summary for leases WITHOUT infrastructure (absent)
+  leases_absent_summary <- all_marine_leases_with_status %>%
+    filter(Infra_status == "absent") %>%
+    st_drop_geometry() %>%
+    group_by(state_lease, Group, Species_standardized) %>%
+    summarise(
+      n_leases = n(),
+      total_area_km2 = round(sum(area_km2, na.rm = TRUE), 3),
+      .groups = 'drop'
+    ) %>%
+    arrange(state_lease, Group, Species_standardized)
+  
+  message("\nLEASES WITHOUT INFRASTRUCTURE (ABSENT):")
+  print(leases_absent_summary)
+}
+```
+
+# ===== SAVE SSRG'S RESULTS with species and status =====
+
+```{r}
+message("\n=== SAVING PROCESSED LEASE DATA ===")
+
+# Create output directory
+leases_output_dir <- here("output_data/marine_leases_status_results")
+if (!dir.exists(leases_output_dir)) {
+  dir.create(leases_output_dir, recursive = TRUE)
+  message(paste("Created output directory:", leases_output_dir))
+}
+
+# Remove non-polygon geometries
+all_marine_leases_with_status <- all_marine_leases_with_status %>%
+  filter(st_geometry_type(.) %in% c("POLYGON", "MULTIPOLYGON"))
+
+message(paste("After filtering non-polygon geometries:", nrow(all_marine_leases_with_status), "leases"))
+# Save all marine leases with status
+if (!is.null(all_marine_leases_with_status) && nrow(all_marine_leases_with_status) > 0) {
+  # Shapefile
+  all_leases_path <- file.path(leases_output_dir, "all_marine_leases_with_status.shp")
+  st_write(all_marine_leases_with_status, all_leases_path, delete_dsn = TRUE, quiet = FALSE)
+  message(paste("  Saved all marine leases:", nrow(all_marine_leases_with_status), "leases"))
+  
+  # CSV
+  all_leases_csv <- file.path(leases_output_dir, "all_marine_leases_with_status.csv")
+  all_marine_leases_with_status %>%
+    st_drop_geometry() %>%
+    write.csv(all_leases_csv, row.names = FALSE)
+  message(paste("  Saved CSV"))
+}
+
+# Save leases with infrastructure present
+leases_present <- all_marine_leases_with_status %>%
+  filter(Infra_status == "present")
+
+if (nrow(leases_present) > 0) {
+  # Shapefile
+  present_path <- file.path(leases_output_dir, "leases_infrastructure_present.shp")
+  st_write(leases_present, present_path, delete_dsn = TRUE, quiet = FALSE)
+  message(paste("  Saved leases with infrastructure:", nrow(leases_present), "leases"))
+  
+  # CSV
+  present_csv <- file.path(leases_output_dir, "leases_infrastructure_present.csv")
+  leases_present %>%
+    st_drop_geometry() %>%
+    write.csv(present_csv, row.names = FALSE)
+}
+
+# Save leases without infrastructure (absent)
+leases_absent <- all_marine_leases_with_status %>%
+  filter(Infra_status == "absent")
+
+if (nrow(leases_absent) > 0) {
+  # Shapefile
+  absent_path <- file.path(leases_output_dir, "leases_infrastructure_absent.shp")
+  st_write(leases_absent, absent_path, delete_dsn = TRUE, quiet = FALSE)
+  message(paste("  Saved leases without infrastructure:", nrow(leases_absent), "leases"))
+  
+  # CSV
+  absent_csv <- file.path(leases_output_dir, "leases_infrastructure_absent.csv")
+  leases_absent %>%
+    st_drop_geometry() %>%
+    write.csv(absent_csv, row.names = FALSE)
+}
+
+# Save summary statistics
+summary_path <- file.path(leases_output_dir, "lease_summary_statistics.csv")
+
+summary_combined <- bind_rows(
+  leases_detailed_summary %>% mutate(summary_type = "by_state_status_group_species"),
+  leases_state_status_summary %>% mutate(Group = NA, Species_standardized = NA, summary_type = "by_state_status") %>%
+    select(state_lease, Infra_status, Group, Species_standardized, everything()),
+  leases_group_species_summary %>% mutate(state_lease = "All_States", Infra_status = "All", summary_type = "by_group_species") %>%
+    select(state_lease, Infra_status, Group, Species_standardized, everything()),
+  leases_state_summary %>% mutate(Infra_status = "All", Group = NA, Species_standardized = NA, summary_type = "by_state") %>%
+    select(state_lease, Infra_status, Group, Species_standardized, everything()),
+  leases_status_summary %>% mutate(state_lease = "All_States", Group = NA, Species_standardized = NA, summary_type = "by_status") %>%
+    select(state_lease, Infra_status, Group, Species_standardized, everything())
+)
+write.csv(summary_combined, summary_path, row.names = FALSE)
+message(paste("  Saved summary statistics"))
+
+message("\nAll lease results saved to:", leases_output_dir)
+```
+
+# ===== SEPARATE FINFISH AND SHELLFISH INFRASTRUCTURE WITH STATE SUMMARIES SSRG classification SIMON =====
+```{r}
+# ===== SEPARATE FINFISH AND SHELLFISH INFRASTRUCTURE WITH STATE SUMMARIES =====
+
+if (!is.null(all_ssrg_detections_marine)) {
+  
+  # Separate by infrastructure type
+  finfish_infrastructure_ssrg <- all_ssrg_detections_marine %>%
+    filter(infrastructure_type == "Finfish (Cages)")
+  
+  shellfish_infrastructure_ssrg <- all_ssrg_detections_marine %>%
+    filter(infrastructure_type == "Shellfish (Longlines)")
+  
+  message(paste("\n✓ Separated infrastructure:"))
+  message(paste("  Finfish (cages):", nrow(finfish_infrastructure_ssrg)))
+  message(paste("  Shellfish (longlines):", nrow(shellfish_infrastructure_ssrg)))
+  
+  # ===== STATE-LEVEL SUMMARIES BY INFRASTRUCTURE TYPE =====
+  
+  message("\n=== INFRASTRUCTURE AREA BY STATE AND TYPE ===")
+  
+  # Overall summary by state and infrastructure type
+  ssrg_state_type_summary <- all_ssrg_detections_marine %>%
+    st_drop_geometry() %>%
+    group_by(State, infrastructure_type) %>%
+    summarise(
+      n_features = n(),
+      total_area_km2 = round(sum(area_km2, na.rm = TRUE),3),
+            .groups = 'drop'
+    ) %>%
+    arrange(State, infrastructure_type)
+  
+  message("\n✓ Infrastructure by state and type:")
+  print(ssrg_state_type_summary)
+  
+  # Cages summary by state
+  ssrg_cages_summary <- finfish_infrastructure_ssrg %>%
+    st_drop_geometry() %>%
+    group_by(State) %>%
+    summarise(
+      n_cages = n(),
+      total_cage_area_km2 = round(sum(area_km2, na.rm = TRUE),3),
+            .groups = 'drop'
+    ) %>%
+    arrange(desc(total_cage_area_km2))
+  
+  message("\n✓ FINFISH CAGES BY STATE:")
+  print(ssrg_cages_summary)
+  
+  # Longlines summary by state
+  ssrg_longlines_summary <- shellfish_infrastructure_ssrg %>%
+    st_drop_geometry() %>%
+    group_by(State) %>%
+    summarise(
+      n_longlines = n(),
+      total_longline_area_km2 = round(sum(area_km2, na.rm = TRUE),3),
+      .groups = 'drop'
+    ) %>%
+    arrange(desc(total_longline_area_km2))
+  
+  message("\n✓ SHELLFISH LONGLINES BY STATE:")
+  print(ssrg_longlines_summary)
+  
+  # National totals
+  message("\n✓ NATIONAL TOTALS:")
+  message(paste("  Total cages:", sum(ssrg_cages_summary$n_cages), 
+                "features |", round(sum(ssrg_cages_summary$total_cage_area_km2), 4), "km²"))
+  message(paste("  Total longlines:", sum(ssrg_longlines_summary$n_longlines), 
+                "features |", round(sum(ssrg_longlines_summary$total_longline_area_km2), 4), "km²"))
+  
+  # National totals
+  national_cages_total <- sum(ssrg_cages_summary$n_cages)
+  national_cages_area <- sum(ssrg_cages_summary$total_cage_area_km2)
+  national_longlines_total <- sum(ssrg_longlines_summary$n_longlines)
+  national_longlines_area <- sum(ssrg_longlines_summary$total_longline_area_km2)
+  
+  message("\n✓ NATIONAL TOTALS:")
+  message(paste("  Total cages:", national_cages_total, 
+                "features |", round(national_cages_area, 4), "km²"))
+  message(paste("  Total longlines:", national_longlines_total, 
+                "features |", round(national_longlines_area, 4), "km²"))
+  
+  # ===== SAVE INFRASTRUCTURE SUMMARIES =====
+  
+  message("\n=== SAVING INFRASTRUCTURE SUMMARIES ===")
+  
+  infra_summary_dir <- here("output_data/infrastructure_summaries")
+  if (!dir.exists(infra_summary_dir)) {
+    dir.create(infra_summary_dir, recursive = TRUE)
+  }
+  
+  # Save state-by-type summary
+  write.csv(ssrg_state_type_summary, 
+            file.path(infra_summary_dir, "infrastructure_by_state_and_type.csv"), 
+            row.names = FALSE)
+  message("  ✓ Saved: infrastructure_by_state_and_type.csv")
+  
+  # Save cages by state
+  write.csv(ssrg_cages_summary, 
+            file.path(infra_summary_dir, "finfish_cages_by_state.csv"), 
+            row.names = FALSE)
+  message("  ✓ Saved: finfish_cages_by_state.csv")
+  
+  # Save longlines by state
+  write.csv(ssrg_longlines_summary, 
+            file.path(infra_summary_dir, "shellfish_longlines_by_state.csv"), 
+            row.names = FALSE)
+  message("  ✓ Saved: shellfish_longlines_by_state.csv")
+  
+  # Save national totals
+  national_totals <- data.frame(
+    infrastructure_type = c("Finfish (Cages)", "Shellfish (Longlines)"),
+    n_features = c(national_cages_total, national_longlines_total),
+    total_area_km2 = c(national_cages_area, national_longlines_area)
+  )
+  
+  write.csv(national_totals, 
+            file.path(infra_summary_dir, "national_infrastructure_totals.csv"), 
+            row.names = FALSE)
+  message("  ✓ Saved: national_infrastructure_totals.csv")
+  
+  message(paste("\n✓✓✓ All infrastructure summaries saved to:", infra_summary_dir))
+
+}
+```
+
+
+# ===== SAVE SSRG'S RESULTS =====
+
+```{r}
+message("\n=== SAVING SSRG'S PROCESSED DATA ===")
+
+# Create output directory for SSRG results
+ssrg_output_dir <- here("output_data/SSRG_GEE_results")
+if (!dir.exists(ssrg_output_dir)) {
+  dir.create(ssrg_output_dir, recursive = TRUE)
+  message(paste("Created output directory:", ssrg_output_dir))
+}
+
+# Save all marine detections
+if (!is.null(all_ssrg_detections_marine) && nrow(all_ssrg_detections_marine) > 0) {
+  # Shapefile
+  all_marine_path <- file.path(ssrg_output_dir, "SSRG_all_marine_detections.shp")
+  st_write(all_ssrg_detections_marine, all_marine_path, delete_dsn = TRUE, quiet = FALSE)
+  message(paste("  Saved all marine detections:", nrow(all_ssrg_detections_marine), "features"))
+  
+  # CSV
+  all_marine_csv <- file.path(ssrg_output_dir, "SSRG_all_marine_detections.csv")
+  all_ssrg_detections_marine %>%
+    st_drop_geometry() %>%
+    write.csv(all_marine_csv, row.names = FALSE)
+  message(paste("  Saved CSV"))
+}
+
+# Save finfish infrastructure
+if (!is.null(finfish_infrastructure_ssrg) && nrow(finfish_infrastructure_ssrg) > 0) {
+  # Shapefile
+  finfish_path <- file.path(ssrg_output_dir, "SSRG_finfish_cages_marine.shp")
+  st_write(finfish_infrastructure_ssrg, finfish_path, delete_dsn = TRUE, quiet = FALSE)
+  message(paste("  Saved finfish infrastructure:", nrow(finfish_infrastructure_ssrg), "features"))
+  
+  # CSV
+  finfish_csv <- file.path(ssrg_output_dir, "SSRG_finfish_cages_marine.csv")
+  finfish_infrastructure_ssrg %>%
+    st_drop_geometry() %>%
+    write.csv(finfish_csv, row.names = FALSE)
+  message(paste("  Saved finfish CSV"))
+}
+
+# Save shellfish infrastructure
+if (!is.null(shellfish_infrastructure_ssrg) && nrow(shellfish_infrastructure_ssrg) > 0) {
+  # Shapefile
+  shellfish_path <- file.path(ssrg_output_dir, "SSRG_shellfish_longlines_marine.shp")
+  st_write(shellfish_infrastructure_ssrg, shellfish_path, delete_dsn = TRUE, quiet = FALSE)
+  message(paste("  Saved shellfish infrastructure:", nrow(shellfish_infrastructure_ssrg), "features"))
+  
+  # CSV
+  shellfish_csv <- file.path(ssrg_output_dir, "SSRG_shellfish_longlines_marine.csv")
+  shellfish_infrastructure_ssrg %>%
+    st_drop_geometry() %>%
+    write.csv(shellfish_csv, row.names = FALSE)
+  message(paste("  Saved shellfish CSV"))
+}
+
+# Save summary statistics
+if (!is.null(all_ssrg_detections_marine)) {
+  summary_path <- file.path(ssrg_output_dir, "SSRG_summary_statistics.csv")
+  
+  summary_combined <- bind_rows(
+    ssrg_state_type_summary %>% mutate(summary_type = "by_state_and_type"),
+    national_totals %>% mutate(State = "All_States", summary_type = "national_totals")
+  )
+  
+  write.csv(summary_combined, summary_path, row.names = FALSE)
+  message(paste("  Saved summary statistics"))
+}
+
+message("\nAll SSRG results saved to:", ssrg_output_dir)
+```
+
+
+# ===== CREATE MAPS FOR SSRG'S DATA =====
+
+```{r}
+# Set tmap to view mode
+tmap_mode("view")
+
+# Generate colors
+state_colors <- viridis(7)
+
+# Create comprehensive map for SSRG data
+ssrg_marine_map <- tm_basemap("Esri.WorldImagery") +
+  
+  # Add state boundaries
+  tm_shape(AUS_states) +
+  tm_borders(col = 'white', alpha = 0.3, lwd = 0.5) +
+  
+  # Add official marine leases (same as before)
+  {if (!is.null(QLD_marine_leases)) {
+    tm_shape(QLD_marine_leases) +
+      tm_polygons(col = state_colors[1], border.col = state_colors[1], lwd = 1, alpha = 0.2, 
+                  popup.vars = TRUE, id = "QLD Marine Leases", group = "Marine Leases")
+  }} +
+  
+  {if (!is.null(NSW_marine_leases)) {
+    tm_shape(NSW_marine_leases) +
+      tm_polygons(col = state_colors[2], border.col = state_colors[2], lwd = 1, alpha = 0.2,
+                  popup.vars = TRUE, id = "NSW Marine Leases", group = "Marine Leases")
+  }} +
+  
+  {if (!is.null(SA_leases)) {
+    tm_shape(SA_leases) +
+      tm_polygons(col = state_colors[3], border.col = state_colors[3], lwd = 1, alpha = 0.2,
+                  popup.vars = TRUE, id = "SA Leases", group = "Marine Leases")
+  }} +
+  
+  {if (!is.null(WA_leases)) {
+    tm_shape(WA_leases) +
+      tm_polygons(col = state_colors[4], border.col = state_colors[4], lwd = 1, alpha = 0.2,
+                  popup.vars = TRUE, id = "WA Leases", group = "Marine Leases")
+  }} +
+  
+  {if (!is.null(TAS_marine_leases)) {
+    tm_shape(TAS_marine_leases) +
+      tm_polygons(col = state_colors[5], border.col = state_colors[5], lwd = 1, alpha = 0.2,
+                  popup.vars = TRUE, id = "TAS Marine Leases", group = "Marine Leases")
+  }} +
+  
+  {if (!is.null(VIC_marine_leases)) {
+    tm_shape(VIC_marine_leases) +
+      tm_polygons(col = state_colors[6], border.col = state_colors[6], lwd = 1, alpha = 0.2,
+                  popup.vars = TRUE, id = "VIC Marine Leases", group = "Marine Leases")
+  }} +
+  
+  {if (!is.null(NT_leases)) {
+    tm_shape(NT_leases) +
+      tm_polygons(col = state_colors[7], border.col = state_colors[7], lwd = 1, alpha = 0.2,
+                  popup.vars = TRUE, id = "NT Leases", group = "Marine Leases")
+  }} +
+  
+  # Add SSRG detected finfish (cages)
+  {if (!is.null(finfish_infrastructure_ssrg) && nrow(finfish_infrastructure_ssrg) > 0) {
+    tm_shape(finfish_infrastructure_ssrg) +
+      tm_polygons(col = "red", alpha = 0.8, border.col = "darkred", lwd = 1.5,
+                  popup.vars = c("State", "area_km2", "Infra_type"), 
+                  id = "SSRG: Finfish Cages", 
+                  group = "SSRG Detections")
+  }} +
+  
+  # Add SSRG detected shellfish (longlines)
+  {if (!is.null(shellfish_infrastructure_ssrg) && nrow(shellfish_infrastructure_ssrg) > 0) {
+    tm_shape(shellfish_infrastructure_ssrg) +
+      tm_polygons(col = "blue", alpha = 0.7, border.col = "darkblue", lwd = 1.5,
+                  popup.vars = c("State", "area_km2", "Infra_type"), 
+                  id = "SSRG: Shellfish Longlines", 
+                  group = "SSRG Detections")
+  }} +
+  
+  # Layout
+  tm_layout(title = "Australia's Marine Aquaculture: SSRG GEE Detections",
+            legend.outside = TRUE,
+            legend.title.size = 1.2,
+            legend.text.size = 0.8) +
+  tm_view(set.view = c(lon = 133.7751, lat = -25.2744, zoom = 5))
+
+# Display the map
+ssrg_marine_map
+```
+
+#SAVE THE MAP IN HTML
+```{r}
+# Save the map
+tmap_save(ssrg_marine_map, 
+          filename = here("figures/SSRG_Marine_Aquaculture_Detections_Map.html"))
+
+message("Map saved to figures/SSRG_Marine_Aquaculture_Detections_Map.html")
+
+```
+
+
+# Session info
+```{r}
+sessionInfo()
+```

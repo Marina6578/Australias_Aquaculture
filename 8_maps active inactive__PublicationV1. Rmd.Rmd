@@ -1,0 +1,277 @@
+---
+title: "8_mapping"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+date: "28/01/2026 to 24/04/2026"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#In this code we aim to make a map with the active inactive land based and marine aquaculture in viridis 
+#This is Figure 2 of the manuscript 
+
+#upload libraries
+```{r}
+library(tmaptools)
+library(gridExtra)
+library(cowplot)
+library(tidyverse)
+library(here)
+library(tmap)
+library(sf)
+library(ggplot2)
+library(dplyr)
+
+```
+
+#upload all leases for Australia together 
+#land
+```{r}
+AU_land_aqua <- st_read(here("output_data/Land_Aquaculture_Vectors/Australia_Land_Aquaculture_National.shp")) %>%
+  st_transform("EPSG:3577")%>%
+  st_make_valid()
+
+# Convert to points
+AU_land_aqua_points <- st_centroid(AU_land_aqua)
+
+```
+
+```{r}
+unique(AU_land_aqua$Infr_st)
+```
+#Marine sites with species
+```{r}
+# Load marine infrastructure — runs independently of script 4
+ AU_marine_leases <- st_read(
+  here("output_data/marine_leases_status_results/all_marine_leases_with_status.shp"))%>%
+   st_transform("EPSG:3577")%>%
+  st_make_valid()
+
+# Convert marine leases to points (centroids)
+AU_marine_leases_points <- st_centroid(AU_marine_leases)
+
+
+```
+## ===== LOAD AUSTRALIAN BOUNDARIES =====
+```{r}
+message("Loading Australian boundary data...")
+
+AUS_states <- st_read(here("raw_data/AustralianStates_SHP/STE_2021_AUST_GDA2020.shp")) %>%
+  st_transform(3577) %>%
+  st_make_valid()
+```
+#acronyms for states for mapping
+```{r}
+state_labels <- AUS_states %>%
+  st_make_valid() %>%
+  filter(!STE_NAME21 %in% c("Other Territories", "Outside Australia",
+                             "Australian Capital Territory")) %>%
+  st_centroid() %>%
+  mutate(
+    lon = st_coordinates(geometry)[, 1],
+    lat = st_coordinates(geometry)[, 2],
+    acronym = case_when(
+      STE_NAME21 == "New South Wales"    ~ "NSW",
+      STE_NAME21 == "Victoria"           ~ "VIC",
+      STE_NAME21 == "Queensland"         ~ "QLD",
+      STE_NAME21 == "South Australia"    ~ "SA",
+      STE_NAME21 == "Western Australia"  ~ "WA",
+      STE_NAME21 == "Tasmania"           ~ "TAS",
+      STE_NAME21 == "Northern Territory" ~ "NT",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(acronym)) %>%
+  st_drop_geometry()
+```
+
+
+#Create the combined status column for land based and marine leases 
+```{r}
+# ===== CREATE COMBINED STATUS — 4 CATEGORIES =====
+# Land-based: distinguish active vs inactive
+# And the case_when mutations
+AU_land_aqua_points <- AU_land_aqua_points %>%
+  mutate(combined_status = case_when(
+    Infr_st == "active" ~ "Land-based: active",
+    TRUE                ~ "Land-based: inactive"
+  ))
+
+AU_marine_leases_points <- AU_marine_leases_points %>%
+  mutate(combined_status = case_when(
+    Infr_st == "present" ~ "Marine: active",
+    TRUE                 ~ "Marine: inactive"
+  ))
+
+# ===== FACTOR ORDER (controls legend order) =====
+status_levels <- c(
+  "Marine: active",
+  "Marine: inactive",
+  "Land-based: active",
+  "Land-based: inactive"
+)
+
+AU_land_aqua_points <- AU_land_aqua_points %>%
+  mutate(combined_status = factor(combined_status, levels = status_levels))
+
+AU_marine_leases_points <- AU_marine_leases_points %>%
+  mutate(combined_status = factor(combined_status, levels = status_levels))
+
+# ===== 4-COLOR PALETTE (viridis-family, colorblind-safe) =====
+# Blues for marine (active = deep, inactive = muted)
+# Greens for land  (active = deep, inactive = muted)
+status_colors <- c(
+  "Marine: active"      = "#2166AC",
+  "Marine: inactive"    = "#92C5DE",
+  "Land-based: active"  = "#1B7837",
+  "Land-based: inactive" = "#A6DBA0"
+)
+
+```
+
+#new maps Marine and Land based 
+```{r}
+# ===== MAP =====
+AU_aqua_map_4color <- ggplot() +
+  geom_sf(data = AUS_states, fill = "grey95", color = "grey80") +
+  
+  # Inactive layers first (rendered underneath)
+  geom_sf(
+    data  = AU_land_aqua_points %>% filter(combined_status == "Land-based: inactive"),
+    aes(color = combined_status),
+    size  = 1.0, alpha = 0.9, shape = 16
+  ) +
+  geom_sf(
+    data  = AU_marine_leases_points %>% filter(combined_status == "Marine: inactive"),
+    aes(color = combined_status),
+    size  = 1.0, alpha = 0.9, shape = 16
+  ) +
+
+  # Active layers on top
+  geom_sf(
+    data  = AU_land_aqua_points %>% filter(combined_status == "Land-based: active"),
+    aes(color = combined_status),
+    size  = 1.0, alpha = 0.9, shape = 16
+  ) +
+  geom_sf(
+    data  = AU_marine_leases_points %>% filter(combined_status == "Marine: active"),
+    aes(color = combined_status),
+    size  = 1.0, alpha = 0.9, shape = 16
+  ) +
+  
+  # State label text
+  geom_text(
+    data   = state_labels,
+    aes(x = lon, y = lat, label = acronym),
+    size   = 3, colour = "grey50", fontface = "bold"
+  ) +
+  
+  scale_color_manual(
+    values = status_colors,
+    name   = NULL,
+    breaks = status_levels
+  ) +
+  
+  guides(
+    color = guide_legend(
+      override.aes = list(size = 3, alpha = 1),
+      ncol = 1
+    )
+  ) +
+  
+  theme_void() +
+  theme(
+    legend.position  = "bottom",
+    legend.direction = "vertical",
+    legend.text      = element_text(size = 10),
+    legend.key       = element_rect(fill = "transparent", colour = NA),
+    panel.background = element_rect(fill = "transparent", colour = NA),
+    plot.background  = element_rect(fill = "transparent", colour = NA)
+  )
+
+# Save
+ggsave(
+  here("figures", "AU_land_marine_aqua_4color.png"),
+  plot   = AU_aqua_map_4color,
+  width  = 10, height = 8, dpi = 300,
+  bg     = "transparent"
+)
+
+plot(AU_aqua_map_4color)
+```
+
+#other possibility for the legends 
+#theme(legend.position  = "right",   legend.direction = "vertical",   # stacks items on top of each other   legend.title     = element_text(face = "bold", size = 11),   legend.text      = element_text(size = 10),   panel.background = element_rect(fill = "transparent", colour = NA),   plot.background  = element_rect(fill = "transparent", colour = NA) )
+
+#other maps only of land based
+#land_based active and inactive sites Theme_minimal
+```{r}
+library(sf)
+library(ggplot2)
+
+
+# Convert polygons to centroids (point locations)
+AU_land_aqua_points <- st_centroid(AU_land_aqua)
+
+# Map with light grey background and small bubbles
+ggplot() +
+  geom_sf(data = AUS_states, fill = "grey95", color = "grey80") +
+  geom_sf(data = AU_land_aqua_points, aes(color = Infr_st), 
+          size = 1.5, alpha = 0.7) +  # adjust size for bubble size
+  scale_color_manual(values = c("active" = "#0072B2", 
+                                "inactive" = "#D55E00"),
+                     name = "Infrastructure Status") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+```
+
+
+
+#land_based active and inactive sites theme_void green and orange
+```{r}
+library(sf)
+library(ggplot2)
+
+# Convert to points
+AU_land_aqua_points <- st_centroid(AU_land_aqua)
+
+# Map without gridlines and with green/red alternatives
+ggplot() +
+  geom_sf(data = AUS_states, fill = "grey95", color = "grey80") +
+  geom_sf(data = AU_land_aqua_points, aes(color = Infr_st), 
+          size = 1.5, alpha = 0.7) +
+  scale_color_manual(values = c("active" = "#009E73",    # bluish green
+                                "inactive" = "#D55E00"),  # red-orange
+                     name = "Infrastructure Status") +
+  theme_void() +  # removes all gridlines and axes
+  theme(legend.position = "bottom")
+```
+
+```{r}
+library(sf)
+library(ggplot2)
+library(here)
+
+
+# Create the map
+land_aqua_map <- ggplot() +
+  geom_sf(data = AUS_states, fill = "grey95", color = "grey80") +
+  geom_sf(data = AU_land_aqua_points, aes(color = Infr_st), 
+          size = 1.5, alpha = 0.7) +
+  scale_color_manual(
+    values = c("active" = "#FDE725",    # viridis yellow (end of scale)
+               "inactive" = "#440154"),  # viridis dark purple/blue (start of scale)
+    name = "Infrastructure Status"
+  ) +
+  theme_void() +
+  theme(legend.position = "bottom")
+
+# Save the map
+ggsave(here("figures", "AU_land_aqua_status.png"), 
+       plot = land_aqua_map, 
+       width = 10, height = 8, dpi = 300)
+```

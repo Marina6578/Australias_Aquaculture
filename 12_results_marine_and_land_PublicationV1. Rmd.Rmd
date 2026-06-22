@@ -1,0 +1,145 @@
+---
+title: "12_results_marine and land"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+
+date: "2026-03-11"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+# Load packages 
+```{r}
+library(tmaptools)
+library(gridExtra)
+library(cowplot)
+library(tidyverse)
+library(here)
+library(tmap)
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(viridisLite)
+library(stringr)
+library(purrr)
+library(docxtractr)
+library(tidyr)
+library(readxl)
+```
+
+#load data
+```{r}
+manuscript_table<-read_excel(here("output_data/summaries/combined_aquaculture_species_summaries.xlsx"),
+  sheet = "Manuscript Table"  # select the sheets in the excel file
+)
+
+land_species<-read_excel(here("output_data/summaries/combined_aquaculture_species_summaries.xlsx"),
+  sheet = "Land National")  # select the sheets in the excel file
+  
+marine_Infra<-read_excel(here("output_data/summaries/combined_aquaculture_species_summaries.xlsx"),
+  sheet = "Marine Infra National")  # select the sheets in the excel file 
+
+marine_species<-read_excel(here("output_data/summaries/combined_aquaculture_species_summaries.xlsx"),
+  sheet = "Marine Infra by State")  # select the sheets in the excel file
+marine_leases<-read_excel(here("output_data/summaries/combined_aquaculture_species_summaries.xlsx"),
+  sheet = "Marine Lease National")  # select the sheets in the excel file
+```
+
+#Results for manuscript
+```{r}
+#marine infrastructure detected
+# What is the number of sites that are active or have presence of infrastructure we had # 2158
+marine_sites_presence<-sum(marine_Infra$n_detections)
+#What is the total area of the Marine aquaculture infrastructure? We found #24.951km2
+marine_infra_area<-sum(marine_Infra$total_infra_km2)
+
+# area of all marine leases
+number_marine_leases<-sum(marine_leases$n_leases)#5528
+area_marine_leases<-sum(marine_leases$lease_area_km2)#961.756km2
+
+#percentage of active leases
+percent_active_leases<- as.numeric(marine_sites_presence/number_marine_leases)
+#percentage of active area
+percentage_area_productive<-as.numeric(marine_infra_area/area_marine_leases)
+
+
+
+```
+#text for the manuscript
+```{r marine-infrastructure-text, results='asis'}
+cat("
+In the marine realm,", sprintf('%.2f', marine_infra_area), "km² of aquaculture 
+infrastructure were detected nationally across", 
+sprintf('%.0f', percent_active_leases*100), "% of the registered marine leases (", 
+marine_sites_presence, "of", number_marine_leases, "), corresponding to", 
+sprintf('%.1f', percentage_area_productive*100), "% of the total licensed marine 
+lease area (", sprintf('%.1f', area_marine_leases), "km²). This footprint comprised 
+primarily longline systems (17.97 km²; 72%) over cages (6.98 km²; 28%). All sites 
+with detected infrastructure were classified as potentially active. Species 
+attribution was possible for", sprintf('%.1f', 2137/marine_sites_presence*100), 
+"% of sites (2,137 sites) and", sprintf('%.1f', 24.8/marine_infra_area*100), 
+"% of the infrastructure area (24.8 km²), while", 
+sprintf('%.1f', 21/marine_sites_presence*100), 
+"% of sites (21 sites) and", sprintf('%.1f', 0.159/marine_infra_area*100), 
+"% (0.159 km²) of infrastructure remained unassigned.
+")
+```
+#land_based results
+```{r}
+# Read the data
+national_sf <- st_read(here("output_data", "Land_Aquaculture_Vectors", 
+                            "Australia_Land_Aquaculture_National.shp"))
+```
+
+#calculations and text
+```{r land-infrastructure-text, results='asis'}
+cat("
+Land-based aquaculture infrastructure occupied", sprintf('%.2f', sum(national_sf$In_A_KM, na.rm=TRUE)), 
+"km² nationally in 2021–2022, corresponding to", 
+sprintf('%.1f', sum(national_sf$In_A_KM, na.rm=TRUE)/sum(national_sf$Ls_A_KM, na.rm=TRUE)*100), 
+"% of the total licensed land-based lease area (", 
+sprintf('%.1f', sum(national_sf$Ls_A_KM, na.rm=TRUE)), "km²), and exhibited a markedly 
+uneven spatial distribution among states. Queensland accounted for the largest 
+share (13.03 km², 49%), followed by South Australia (8.78 km²). Smaller footprints 
+were detected in New South Wales (2 km²), the Northern Territory (1.57 km²), and 
+Western Australia (1.29 km²), while Victoria (0.19 km²) and Tasmania (0.1 km²) 
+had comparatively minor areas. Across the 441 land-based aquaculture sites 
+identified nationally, 294 (66.7%) were classified as active and 147 (33.3%) as 
+inactive (Figure 2). Species attribution was possible for 61.2% of the sites 
+(270 sites) and 86.3% of the infrastructure area (22.961 km²), while 38.8% of 
+the sites (171 sites) and 13.7% (3.63 km²) of the infrastructure remained unassigned.
+")
+```
+#Here are the key values to work with:
+#Land-basedMarineInfrastructure area27.09 km²24.95 km²Lease area2,294.56 km²961.8 km²% lease utilised1.5%2.6%Sites4412,158Active294 (66.7%)2,158 (100%)Species attribution61.2% sites99% sites
+
+#comparison_land_marine
+
+```{r comparison-text, results='asis'}
+cat("
+Despite similar total infrastructure areas (land-based: 27.09 km²; marine: 24.95 km²), 
+the two realms differed markedly in lease utilisation, site activity, and species 
+attribution. Marine leases covered a smaller total licensed area (961.8 km²) than 
+land-based leases (2,294.56 km²), yet both realms exhibited low infrastructure-to-lease 
+ratios (marine: 2.6%; land-based: 1.5%), reflecting the large proportion of registered 
+but unproductive lease area in Australian aquaculture. Infrastructure was detected at 
+39% of registered marine leases (2,158 of 5,528), all classified as potentially active, 
+whereas land-based detection was proportionally higher (66.7%; 294 of 441), though 
+one third of land-based sites (147; 33.3%) showed no detectable infrastructure. 
+Species attribution was near-complete for marine sites (99.0% of sites; 99.4% of area), 
+compared to considerably lower coverage for land-based operations (61.2% of sites; 
+86.3% of area), likely reflecting greater privacy constraints on land-based farm data, 
+as marine leases are granted over public waters and are therefore less subject to 
+land tenure and privacy restrictions
+")
+```
+
+
+

@@ -1,0 +1,1497 @@
+---
+title: "6_figures_species_by_state"
+Author: Alexandra White and Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+date: "2025-11-10 to 24 april 2026"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load required libraries
+library(tidyverse)
+library(sf)
+library(here)
+library(dplyr)
+library(viridis)
+library(viridisLite)
+
+```
+
+#Script for heat map for MC data attribute table and species
+# Australian Aquaculture Species Distribution Heatmap. This script creates a visualization showing which species are present in each state
+```{r}
+
+# Load required libraries
+library(here)
+library(tidyverse)
+library(viridis)
+
+# Read data
+data <- read.csv(here("raw_data/Aquaculture_production_ABARES_DAFF/table_states_species_aquaculture_Australia.csv"))
+
+# Clean the data and rename columns
+# Remove rows with empty group (header rows and empty rows)
+data <- data %>%
+  filter(group != "", !is.na(group)) %>%
+  mutate(realm = str_trim(realm))  # Remove leading/trailing whitespace from realm values
+
+# Convert to long format for plotting
+data_long <- data %>%
+  pivot_longer(cols = NT:WA,
+               names_to = "state",
+               values_to = "presence") %>%
+  filter(presence == "Y")  # Changed from 1 to "Y" based on actual data
+
+# Create ordered factors for better plotting
+state_order <- c("NT", "QLD", "NSW", "VIC", "TAS", "SA", "WA")
+data_long$state <- factor(data_long$state, levels = state_order)
+
+# Order species by group for cleaner visualization
+data_long <- data_long %>%
+  arrange(group, popular_name) %>%
+  mutate(popular_name = factor(popular_name, levels = unique(popular_name)))
+
+# Create the plot - Option 1: Simple dots with viridis colors
+# Using viridis discrete palette for groups
+p1 <- ggplot(data_long, aes(x = state, y = popular_name)) +
+  geom_point(aes(color = group), size = 3, shape = 16) +
+  scale_color_viridis_d(option = "D", begin = 0.2, end = 0.9) +
+  labs(x = "Australian State/Territory",
+       y = "Species",
+       title = "Australian Aquaculture Species Distribution by State",
+       color = "Group") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8),
+        axis.text.x = element_text(size = 10, face = "bold"),
+        panel.grid.major.x = element_line(color = "grey90"),
+        panel.grid.major.y = element_line(color = "grey90"),
+        legend.position = "right")
+
+# Save the plot
+ggsave(here("figures/species_distribution_dots.png"), p1, width = 10, height = 12, dpi = 300)
+
+# Create the plot - Option 2: Heatmap style with tiles
+p2 <- ggplot(data_long, aes(x = state, y = popular_name, fill = group)) +
+  geom_tile(color = "white", linewidth = 0.5) +  # Changed 'size' to 'linewidth'
+  scale_fill_viridis_d(option = "D", begin = 0.2, end = 0.9) +
+  labs(x = "Australian State/Territory",
+       y = "Species",
+       title = "Australian Aquaculture Species Distribution by State",
+       fill = "Group") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8),
+        axis.text.x = element_text(size = 10, face = "bold"),
+        panel.grid = element_blank(),
+        legend.position = "right")
+
+# Save the heatmap version - FIXED: Removed comma before path string
+ggsave(here("figures/species_distribution_heatmap.png"), p2, width = 10, height = 12, dpi = 300)
+
+# Create the plot - Option 3: Faceted by group (cleaner organization)
+p3 <- ggplot(data_long, aes(x = state, y = popular_name)) +
+  geom_point(aes(color = realm), size = 3, shape = 16) +
+  scale_color_viridis_d(option = "C", begin = 0.2, end = 0.8) +
+  facet_wrap(~group, scales = "free_y", ncol = 1) +
+  labs(x = "Australian State/Territory",
+       y = "Species",
+       title = "Australian Aquaculture Species Distribution by State",
+       color = "Realm") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8),
+        axis.text.x = element_text(size = 10, face = "bold"),
+        panel.grid.major.x = element_line(color = "grey90"),
+        panel.grid.major.y = element_line(color = "grey90"),
+        strip.text = element_text(size = 12, face = "bold"),
+        legend.position = "right")
+
+# Save the faceted version 
+ggsave(here("figures/species_distribution_faceted.png"), p3, width = 10, height = 14, dpi = 300)
+
+print("All plots have been created successfully!")
+print("- species_distribution_dots.png (dot plot)")
+print("- species_distribution_heatmap.png (tile/heatmap)")
+print("- species_distribution_faceted.png (separated by group)")
+```
+#making the table_1 as a figure 
+
+```{r}
+# Load required libraries
+library(here)
+library(tidyverse)
+library(viridis)
+
+# Create the data
+data_availability <- tribble(
+  ~STATE, ~MARINE_public, ~LAND_public, ~MARINE_realm, ~LAND_realm, ~MARINE_spatial, ~LAND_spatial, ~MARINE_active, ~LAND_active, ~MARINE_species, ~LAND_species,
+  "QLD", "OR", "OR", "NA", "NA", "point (vector)", "cadastre number", "N", "NA", "Y", "P",
+  "NSW", "Y", "N", "Y", "NA", "polygon (vector)", "NA", "Y", "NA", "N", "NA",
+  "VIC", "Y", "N", "Y", "NA", "point (vector)", "NA", "N", "NA", "N", "NA",
+  "TAS", "Y", "N", "Y", "NA", "polygon (vector)", "NA", "N", "NA", "N", "NA",
+  "SA", "Y", "Y", "Y", "Y", "polygon (vector)", "polygon (vector)", "Y", "Y", "Y", "N",
+  "WA", "Y", "Y", "N", "N", "polygon (vector)", "polygon (vector)", "N", "NA", "N", "N",
+  "NT", "OR", "Y", "N", "N", "point (vector)", "point (vector)", "Y", "Y", "Y", "Y"
+)
+
+# Reshape to long format for plotting
+data_long <- data_availability %>%
+  pivot_longer(cols = -STATE, 
+               names_to = c("realm", "category"),
+               names_pattern = "(.*)_(.*)",
+               values_to = "value") %>%
+  mutate(
+    # Create display value with full words
+    display_value = case_when(
+      value == "Y" ~ "Yes",
+      value == "N" ~ "No",
+      value == "OR" ~ "On Request",
+      value == "P" ~ "Partial",
+      value == "NA" ~ "NA",
+      TRUE ~ value  # Keep spatial data types as is
+    ),
+    # Create a numeric value for coloring
+    value_numeric = case_when(
+      value == "Y" ~ 3,
+      value == "OR" ~ 2,
+      value == "P" ~ 2,
+      value == "N" ~ 1,
+      value == "NA" ~ 0,
+      TRUE ~ 3  # Spatial data types get "Yes" color (they exist)
+    ),
+    # Flag for spatial data types (for adding border)
+    is_spatial = category == "spatial" & !value %in% c("Y", "N", "OR", "P", "NA"),
+    # Clean up category names for display
+    category_label = case_when(
+      category == "public" ~ "Data publicly\navailable?",
+      category == "realm" ~ "Realm\nspecified?",
+      category == "spatial" ~ "Spatial data\ntype",
+      category == "active" ~ "Active vs\ninactive specified",
+      category == "species" ~ "Species\ninformation provided"
+    ),
+    # Create ordered factor for categories
+    category_label = factor(category_label, 
+                           levels = c("Data publicly\navailable?", 
+                                    "Realm\nspecified?", 
+                                    "Spatial data\ntype", 
+                                    "Active vs\ninactive specified", 
+                                    "Species\ninformation provided")),
+    # Order states
+    STATE = factor(STATE, levels = c("QLD", "NSW", "VIC", "TAS", "SA", "WA", "NT")),
+    # Clean realm labels
+    realm = factor(realm, levels = c("MARINE", "LAND"), labels = c("Marine", "Land"))
+  )
+
+# Create the heatmap
+p <- ggplot(data_long, aes(x = realm, y = STATE)) +
+  # Add tiles for all values with color
+  geom_tile(aes(fill = value_numeric), 
+            color = "white", linewidth = 1) +
+  # Add thicker colored border for spatial data types
+  geom_tile(data = filter(data_long, is_spatial),
+            fill = NA,
+            color = "#FDE725FF",  # Viridis yellow color (the "Yes" color)
+            linewidth = 2) +
+  # Add text labels for all cells using display_value (full words)
+  geom_text(aes(label = display_value), 
+            size = 3, 
+            fontface = "bold",
+            color = "grey20") +
+  # Use viridis color scale
+  scale_fill_viridis_c(option = "D", 
+                       begin = 0.25, 
+                       end = 0.95,
+                       breaks = c(0, 1, 2, 3),
+                       labels = c("NA", "No", "Partial/\nOn Request", "Yes"),
+                       guide = guide_colorbar(title = "Response",
+                                            barwidth = 1,
+                                            barheight = 8)) +
+  # Facet by category
+  facet_grid(. ~ category_label, 
+             scales = "free_x") +
+  # Labels and theme
+  labs(x = NULL,
+       y = "State/Territory",
+       title = "Australian Aquaculture Data Availability by State and Realm") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10, face = "bold", angle = 0, hjust = 0.5),
+    axis.text.y = element_text(size = 10, face = "bold"),
+    strip.text.x = element_text(size = 9, face = "bold", margin = margin(t = 5, b = 5)),
+    panel.grid = element_blank(),
+    panel.spacing = unit(0.5, "lines"),
+    legend.position = "right",
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    panel.background = element_rect(fill = "grey95", color = NA)
+  )
+
+# Save the plot
+ggsave(here("figures/data_availability_table.png"), 
+       p, 
+       width = 14, 
+       height = 6, 
+       dpi = 300,
+       bg = "white")
+
+print("Data availability table created successfully!")
+print("Saved as: data_availability_table.png")
+```
+
+# 2 separate matrices one for land-based and one for marine for the paper version 2
+
+```{r}
+# Load required libraries
+library(here)
+library(tidyverse)
+library(viridis)
+
+# Create the data
+data_availability <- tribble(
+  ~STATE, ~MARINE_public, ~LAND_public, ~MARINE_realm, ~LAND_realm, ~MARINE_spatial, ~LAND_spatial, ~MARINE_active, ~LAND_active, ~MARINE_species, ~LAND_species,
+  "QLD", "OR", "OR", "NA", "NA", "point (vector)", "cadastre number", "N", "NA", "Y", "P",
+  "NSW", "Y", "N", "Y", "NA", "polygon (vector)", "NA", "Y", "NA", "N", "NA",
+  "VIC", "Y", "N", "Y", "NA", "point (vector)", "NA", "N", "NA", "N", "NA",
+  "TAS", "Y", "N", "Y", "NA", "polygon (vector)", "NA", "N", "NA", "N", "NA",
+  "SA", "Y", "Y", "Y", "Y", "polygon (vector)", "polygon (vector)", "Y", "Y", "Y", "N",
+  "WA", "Y", "Y", "N", "N", "polygon (vector)", "polygon (vector)", "N", "NA", "N", "N",
+  "NT", "OR", "Y", "N", "N", "point (vector)", "point (vector)", "Y", "Y", "Y", "Y"
+)
+
+# ============================================================================
+# Prepare MARINE data
+# ============================================================================
+marine_data <- data_availability %>%
+  select(STATE, starts_with("MARINE_")) %>%
+  pivot_longer(cols = -STATE, 
+               names_to = "category",
+               names_prefix = "MARINE_",
+               values_to = "value") %>%
+  mutate(
+    # Create display value with full words and line breaks for spatial data
+    display_value = case_when(
+      value == "Y" ~ "Yes",
+      value == "N" ~ "No",
+      value == "OR" ~ "On Request",
+      value == "P" ~ "Partial",
+      value == "NA" ~ "No",
+      value == "polygon (vector)" ~ "polygon\n(vector)",
+      value == "point (vector)" ~ "point\n(vector)",
+      value == "cadastre number" ~ "cadastre\nnumber",
+      TRUE ~ value  # Keep other spatial data types as is
+    ),
+    # Create a categorical value for coloring
+    value_category = case_when(
+      value == "Y" ~ "Yes",
+      value == "OR" ~ "Partial/On Request",
+      value == "P" ~ "Partial/On Request",
+      value == "N" ~ "No",
+      value == "NA" ~ "No",
+      TRUE ~ "Yes"  # Spatial data types get "Yes" color (they exist)
+    ),
+    # Create ordered factor for the legend
+    value_category = factor(value_category, 
+                           levels = c("No", "Partial/On Request", "Yes")),
+    # Flag for spatial data types (for adding border)
+    is_spatial = category == "spatial" & !value %in% c("Y", "N", "OR", "P", "NA"),
+    # Clean up category names for display
+    category_label = case_when(
+      category == "public" ~ "Data publicly\navailable?",
+      category == "realm" ~ "Realm\nspecified?",
+      category == "spatial" ~ "Spatial data\ntype",
+      category == "active" ~ "Active vs\ninactive specified",
+      category == "species" ~ "Species\ninformation provided"
+    ),
+    # Create ordered factor for categories
+    category_label = factor(category_label, 
+                           levels = c("Data publicly\navailable?", 
+                                    "Realm\nspecified?", 
+                                    "Spatial data\ntype", 
+                                    "Active vs\ninactive specified", 
+                                    "Species\ninformation provided")),
+    # Order states
+    STATE = factor(STATE, levels = c("QLD", "NSW", "VIC", "TAS", "SA", "WA", "NT"))
+  )
+
+# Create MARINE plot
+p_marine <- ggplot(marine_data, aes(x = STATE, y = category_label)) +
+  # Add tiles for all values with color
+  geom_tile(aes(fill = value_category), 
+            color = "white", linewidth = 1) +
+  # Add thicker colored border for spatial data types
+  geom_tile(data = filter(marine_data, is_spatial),
+            fill = NA,
+            color = "#FDE725FF",  # Viridis yellow color (the "Yes" color)
+            linewidth = 2) +
+  # Add text labels for all cells using display_value (full words)
+  geom_text(aes(label = display_value), 
+            size = 3.5, 
+            fontface = "bold",
+            color = "grey20") +
+  # Use viridis color scale with discrete colors
+  scale_fill_viridis_d(option = "D", 
+                       begin = 0.25, 
+                       end = 0.95,
+                       name = "Response") +
+  # Labels and theme
+  labs(x = "State/Territory",
+       y = NULL,
+       title = "Marine Aquaculture Data Availability by State") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 9, face = "bold"),
+    panel.grid = element_blank(),
+    legend.position = "right",
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    panel.background = element_rect(fill = "grey95", color = NA),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+
+# Save MARINE plot with new name
+ggsave(here("figures/data_availability_marine_v2.png"), 
+       p_marine, 
+       width = 10, 
+       height = 6, 
+       dpi = 300,
+       bg = "white")
+
+# ============================================================================
+# Prepare LAND data
+# ============================================================================
+land_data <- data_availability %>%
+  select(STATE, starts_with("LAND_")) %>%
+  pivot_longer(cols = -STATE, 
+               names_to = "category",
+               names_prefix = "LAND_",
+               values_to = "value") %>%
+  mutate(
+    # Create display value with full words and line breaks for spatial data
+    display_value = case_when(
+      value == "Y" ~ "Yes",
+      value == "N" ~ "No",
+      value == "OR" ~ "On Request",
+      value == "P" ~ "Partial",
+      value == "NA" ~ "No",
+      value == "polygon (vector)" ~ "polygon\n(vector)",
+      value == "point (vector)" ~ "point\n(vector)",
+      value == "cadastre number" ~ "cadastre\nnumber",
+      TRUE ~ value  # Keep other spatial data types as is
+    ),
+    # Create a categorical value for coloring
+    value_category = case_when(
+      value == "Y" ~ "Yes",
+      value == "OR" ~ "Partial/On Request",
+      value == "P" ~ "Partial/On Request",
+      value == "N" ~ "No",
+      value == "NA" ~ "No",
+      TRUE ~ "Yes"  # Spatial data types get "Yes" color (they exist)
+    ),
+    # Create ordered factor for the legend
+    value_category = factor(value_category, 
+                           levels = c("No", "Partial/On Request", "Yes")),
+    # Flag for spatial data types (for adding border)
+    is_spatial = category == "spatial" & !value %in% c("Y", "N", "OR", "P", "NA"),
+    # Clean up category names for display
+    category_label = case_when(
+      category == "public" ~ "Data publicly\navailable?",
+      category == "realm" ~ "Realm\nspecified?",
+      category == "spatial" ~ "Spatial data\ntype",
+      category == "active" ~ "Active vs\ninactive specified",
+      category == "species" ~ "Species\ninformation provided"
+    ),
+    # Create ordered factor for categories
+    category_label = factor(category_label, 
+                           levels = c("Data publicly\navailable?", 
+                                    "Realm\nspecified?", 
+                                    "Spatial data\ntype", 
+                                    "Active vs\ninactive specified", 
+                                    "Species\ninformation provided")),
+    # Order states
+    STATE = factor(STATE, levels = c("QLD", "NSW", "VIC", "TAS", "SA", "WA", "NT"))
+  )
+
+# Create LAND plot
+p_land <- ggplot(land_data, aes(x = STATE, y = category_label)) +
+  # Add tiles for all values with color
+  geom_tile(aes(fill = value_category), 
+            color = "white", linewidth = 1) +
+  # Add thicker colored border for spatial data types
+  geom_tile(data = filter(land_data, is_spatial),
+            fill = NA,
+            color = "#FDE725FF",  # Viridis yellow color (the "Yes" color)
+            linewidth = 2) +
+  # Add text labels for all cells using display_value (full words)
+  geom_text(aes(label = display_value), 
+            size = 3.5, 
+            fontface = "bold",
+            color = "grey20") +
+  # Use viridis color scale with discrete colors
+  scale_fill_viridis_d(option = "D", 
+                       begin = 0.25, 
+                       end = 0.95,
+                       name = "Response") +
+  # Labels and theme
+  labs(x = "State/Territory",
+       y = NULL,
+       title = "Land-based Aquaculture Data Availability by State") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 9, face = "bold"),
+    panel.grid = element_blank(),
+    legend.position = "right",
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    panel.background = element_rect(fill = "grey95", color = NA),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+
+# Save LAND plot with new name
+ggsave(here("figures/data_availability_land_v2.png"), 
+       p_land, 
+       width = 10, 
+       height = 6, 
+       dpi = 300,
+       bg = "white")
+
+print("Separate data availability tables created successfully!")
+print("Saved as:")
+print("  - data_availability_marine_v2.png")
+print("  - data_availability_land_v2.png")
+```
+#version 3 of the matrices (viridis yellow green blue version land and sea separate) 
+```{r}
+# Load required libraries
+library(here)
+library(tidyverse)
+library(viridis)
+
+# Create the data
+data_availability <- tribble(
+  ~STATE, ~MARINE_public, ~LAND_public, ~MARINE_realm, ~LAND_realm, ~MARINE_spatial, ~LAND_spatial, ~MARINE_active, ~LAND_active, ~MARINE_species, ~LAND_species,
+  "QLD", "OR", "OR", "NA", "NA", "point (vector)", "cadastre number", "N", "NA", "Y", "P",
+  "NSW", "Y", "N", "Y", "NA", "polygon (vector)", "NA", "Y", "NA", "N", "NA",
+  "VIC", "Y", "N", "Y", "NA", "point (vector)", "NA", "N", "NA", "N", "NA",
+  "TAS", "Y", "N", "Y", "NA", "polygon (vector)", "NA", "N", "NA", "N", "NA",
+  "SA", "Y", "Y", "Y", "Y", "polygon (vector)", "polygon (vector)", "Y", "Y", "Y", "N",
+  "WA", "Y", "Y", "N", "N", "polygon (vector)", "polygon (vector)", "N", "NA", "N", "N",
+  "NT", "OR", "Y", "N", "N", "point (vector)", "point (vector)", "Y", "Y", "Y", "Y"
+)
+
+# ============================================================================
+# Prepare MARINE data
+# ============================================================================
+marine_data <- data_availability %>%
+  select(STATE, starts_with("MARINE_")) %>%
+  pivot_longer(cols = -STATE, 
+               names_to = "category",
+               names_prefix = "MARINE_",
+               values_to = "value") %>%
+  mutate(
+    # Create display value with full words and line breaks for spatial data
+    display_value = case_when(
+      value == "Y" ~ "Yes",
+      value == "N" ~ "No",
+      value == "OR" ~ "On Request",
+      value == "P" ~ "Partial",
+      value == "NA" ~ "No",
+      value == "polygon (vector)" ~ "polygon\n(vector)",
+      value == "point (vector)" ~ "point\n(vector)",
+      value == "cadastre number" ~ "cadastre\nnumber",
+      TRUE ~ value  # Keep other spatial data types as is
+    ),
+    # Create a categorical value for coloring
+    value_category = case_when(
+      value == "Y" ~ "Yes",
+      value == "OR" ~ "Partial/On Request",
+      value == "P" ~ "Partial/On Request",
+      value == "N" ~ "No",
+      value == "NA" ~ "No",
+      TRUE ~ "Yes"  # Spatial data types get "Yes" color (they exist)
+    ),
+    # Create ordered factor for the legend
+    value_category = factor(value_category, 
+                           levels = c("No", "Partial/On Request", "Yes")),
+    # Flag for spatial data types (for adding border)
+    is_spatial = category == "spatial" & !value %in% c("Y", "N", "OR", "P", "NA"),
+    # Clean up category names for display
+    category_label = case_when(
+      category == "public" ~ "Data publicly\navailable?",
+      category == "realm" ~ "Realm\nspecified?",
+      category == "spatial" ~ "Spatial data\ntype",
+      category == "active" ~ "Active vs\ninactive specified",
+      category == "species" ~ "Species\ninformation provided"
+    ),
+    # Create ordered factor for categories
+    category_label = factor(category_label, 
+                           levels = c("Data publicly\navailable?", 
+                                    "Realm\nspecified?", 
+                                    "Spatial data\ntype", 
+                                    "Active vs\ninactive specified", 
+                                    "Species\ninformation provided")),
+    # Order states
+    STATE = factor(STATE, levels = c("QLD", "NSW", "VIC", "TAS", "SA", "WA", "NT"))
+  )
+
+# Create MARINE plot
+p_marine <- ggplot(marine_data, aes(x = STATE, y = category_label)) +
+  # Add tiles for all values with color
+  geom_tile(aes(fill = value_category), 
+            color = "white", linewidth = 1) +
+  # Add text labels for all cells using display_value (full words)
+  geom_text(aes(label = display_value), 
+            size = 3.5, 
+            fontface = "bold",
+            color = "grey20") +
+  # Use viridis color scale with discrete colors
+  scale_fill_viridis_d(option = "D", 
+                       begin = 0.35, 
+                       end = 0.95,
+                       name = "Response") +
+  # Labels and theme
+  labs(x = "State/Territory",
+       y = NULL,
+       title = "Marine Aquaculture Data Availability by State") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 9, face = "bold"),
+    panel.grid = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    panel.background = element_rect(fill = "grey95", color = NA),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+
+# Save MARINE plot with new name
+ggsave(here("figures/data_availability_marine_v3.png"), 
+       p_marine, 
+       width = 10, 
+       height = 6, 
+       dpi = 300,
+       bg = "white")
+
+# ============================================================================
+# Prepare LAND data
+# ============================================================================
+land_data <- data_availability %>%
+  select(STATE, starts_with("LAND_")) %>%
+  pivot_longer(cols = -STATE, 
+               names_to = "category",
+               names_prefix = "LAND_",
+               values_to = "value") %>%
+  mutate(
+    # Create display value with full words and line breaks for spatial data
+    display_value = case_when(
+      value == "Y" ~ "Yes",
+      value == "N" ~ "No",
+      value == "OR" ~ "On Request",
+      value == "P" ~ "Partial",
+      value == "NA" ~ "No",
+      value == "polygon (vector)" ~ "polygon\n(vector)",
+      value == "point (vector)" ~ "point\n(vector)",
+      value == "cadastre number" ~ "cadastre\nnumber",
+      TRUE ~ value  # Keep other spatial data types as is
+    ),
+    # Create a categorical value for coloring
+    value_category = case_when(
+      value == "Y" ~ "Yes",
+      value == "OR" ~ "Partial/On Request",
+      value == "P" ~ "Partial/On Request",
+      value == "N" ~ "No",
+      value == "NA" ~ "No",
+      TRUE ~ "Yes"  # Spatial data types get "Yes" color (they exist)
+    ),
+    # Create ordered factor for the legend
+    value_category = factor(value_category, 
+                           levels = c("No", "Partial/On Request", "Yes")),
+    # Flag for spatial data types (for adding border)
+    is_spatial = category == "spatial" & !value %in% c("Y", "N", "OR", "P", "NA"),
+    # Clean up category names for display
+    category_label = case_when(
+      category == "public" ~ "Data publicly\navailable?",
+      category == "realm" ~ "Realm\nspecified?",
+      category == "spatial" ~ "Spatial data\ntype",
+      category == "active" ~ "Active vs\ninactive specified",
+      category == "species" ~ "Species\ninformation provided"
+    ),
+    # Create ordered factor for categories
+    category_label = factor(category_label, 
+                           levels = c("Data publicly\navailable?", 
+                                    "Realm\nspecified?", 
+                                    "Spatial data\ntype", 
+                                    "Active vs\ninactive specified", 
+                                    "Species\ninformation provided")),
+    # Order states
+    STATE = factor(STATE, levels = c("QLD", "NSW", "VIC", "TAS", "SA", "WA", "NT"))
+  )
+
+# Create LAND plot
+p_land <- ggplot(land_data, aes(x = STATE, y = category_label)) +
+  # Add tiles for all values with color
+  geom_tile(aes(fill = value_category), 
+            color = "white", linewidth = 1) +
+  # Add text labels for all cells using display_value (full words)
+  geom_text(aes(label = display_value), 
+            size = 3.5, 
+            fontface = "bold",
+            color = "grey20") +
+  # Use viridis color scale with discrete colors
+  scale_fill_viridis_d(option = "D", 
+                       begin = 0.35, 
+                       end = 0.95,
+                       name = "Response") +
+  # Labels and theme
+  labs(x = "State/Territory",
+       y = NULL,
+       title = "Land-based Aquaculture Data Availability by State") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 9, face = "bold"),
+    panel.grid = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    panel.background = element_rect(fill = "grey95", color = NA),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+
+# Save LAND plot with new name
+ggsave(here("figures/data_availability_land_v3.png"), 
+       p_land, 
+       width = 10, 
+       height = 6, 
+       dpi = 300,
+       bg = "white")
+
+print("Separate data availability tables created successfully!")
+print("Saved as:")
+print("  - data_availability_marine_v3.png")
+print("  - data_availability_land_v3.png")
+```
+#V4 version is mako colors for readability
+```{r}
+# Load required libraries
+library(here)
+library(tidyverse)
+library(viridis)
+
+# Create the data
+data_availability <- tribble(
+  ~STATE, ~MARINE_public, ~LAND_public, ~MARINE_realm, ~LAND_realm, ~MARINE_spatial, ~LAND_spatial, ~MARINE_active, ~LAND_active, ~MARINE_species, ~LAND_species,
+  "QLD", "OR", "OR", "NA", "NA", "point (vector)", "cadastre number", "N", "NA", "Y", "P",
+  "NSW", "Y", "N", "Y", "NA", "polygon (vector)", "NA", "Y", "NA", "N", "NA",
+  "VIC", "Y", "N", "Y", "NA", "point (vector)", "NA", "N", "NA", "N", "NA",
+  "TAS", "Y", "N", "Y", "NA", "polygon (vector)", "NA", "N", "NA", "N", "NA",
+  "SA", "Y", "Y", "Y", "Y", "polygon (vector)", "polygon (vector)", "Y", "Y", "Y", "N",
+  "WA", "Y", "Y", "N", "N", "polygon (vector)", "polygon (vector)", "N", "NA", "N", "N",
+  "NT", "OR", "Y", "N", "N", "point (vector)", "point (vector)", "Y", "Y", "Y", "Y"
+)
+
+# ============================================================================
+# Prepare MARINE data
+# ============================================================================
+marine_data <- data_availability %>%
+  select(STATE, starts_with("MARINE_")) %>%
+  pivot_longer(cols = -STATE, 
+               names_to = "category",
+               names_prefix = "MARINE_",
+               values_to = "value") %>%
+  mutate(
+    # Create display value with full words and line breaks for spatial data
+    display_value = case_when(
+      value == "Y" ~ "Yes",
+      value == "N" ~ "No",
+      value == "OR" ~ "On Request",
+      value == "P" ~ "Partial",
+      value == "NA" ~ "No",
+      value == "polygon (vector)" ~ "polygon\n(vector)",
+      value == "point (vector)" ~ "point\n(vector)",
+      value == "cadastre number" ~ "cadastre\nnumber",
+      TRUE ~ value  # Keep other spatial data types as is
+    ),
+    # Create a categorical value for coloring
+    value_category = case_when(
+      value == "Y" ~ "Yes",
+      value == "OR" ~ "Partial/On Request",
+      value == "P" ~ "Partial/On Request",
+      value == "N" ~ "No",
+      value == "NA" ~ "No",
+      TRUE ~ "Yes"  # Spatial data types get "Yes" color (they exist)
+    ),
+    # Create ordered factor for the legend
+    value_category = factor(value_category, 
+                           levels = c("No", "Partial/On Request", "Yes")),
+    # Flag for spatial data types (for adding border)
+    is_spatial = category == "spatial" & !value %in% c("Y", "N", "OR", "P", "NA"),
+    # Clean up category names for display
+    category_label = case_when(
+      category == "public" ~ "Data publicly\navailable?",
+      category == "realm" ~ "Realm\nspecified?",
+      category == "spatial" ~ "Spatial data\ntype",
+      category == "active" ~ "Active vs\ninactive specified",
+      category == "species" ~ "Species\ninformation provided"
+    ),
+    # Create ordered factor for categories
+    category_label = factor(category_label, 
+                           levels = c("Data publicly\navailable?", 
+                                    "Realm\nspecified?", 
+                                    "Spatial data\ntype", 
+                                    "Active vs\ninactive specified", 
+                                    "Species\ninformation provided")),
+    # Order states
+    STATE = factor(STATE, levels = c("QLD", "NSW", "VIC", "TAS", "SA", "WA", "NT"))
+  )
+
+# Create MARINE plot
+p_marine <- ggplot(marine_data, aes(x = STATE, y = category_label)) +
+  # Add tiles for all values with color
+  geom_tile(aes(fill = value_category), 
+            color = "white", linewidth = 1) +
+  # Add text labels for all cells using display_value (full words)
+  geom_text(aes(label = display_value), 
+            size = 3.5, 
+            fontface = "bold",
+            color = "grey20") +
+  # Use mako color scale with lighter colors for better readability
+  scale_fill_viridis_d(option = "G",  # G is mako
+                       begin = 0.40,  # Start lighter (skip darkest colors)
+                       end = 0.95,    # End before the lightest
+                       name = "Response") +
+  # Labels and theme
+  labs(x = "State/Territory",
+       y = NULL,
+       title = "Marine Aquaculture Data Availability by State") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 9, face = "bold"),
+    panel.grid = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    panel.background = element_rect(fill = "grey95", color = NA),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+
+# Save MARINE plot with new name
+ggsave(here("figures/data_availability_marine_v4.png"), 
+       p_marine, 
+       width = 10, 
+       height = 6, 
+       dpi = 300,
+       bg = "white")
+
+# ============================================================================
+# Prepare LAND data
+# ============================================================================
+land_data <- data_availability %>%
+  select(STATE, starts_with("LAND_")) %>%
+  pivot_longer(cols = -STATE, 
+               names_to = "category",
+               names_prefix = "LAND_",
+               values_to = "value") %>%
+  mutate(
+    # Create display value with full words and line breaks for spatial data
+    display_value = case_when(
+      value == "Y" ~ "Yes",
+      value == "N" ~ "No",
+      value == "OR" ~ "On Request",
+      value == "P" ~ "Partial",
+      value == "NA" ~ "No",
+      value == "polygon (vector)" ~ "polygon\n(vector)",
+      value == "point (vector)" ~ "point\n(vector)",
+      value == "cadastre number" ~ "cadastre\nnumber",
+      TRUE ~ value  # Keep other spatial data types as is
+    ),
+    # Create a categorical value for coloring
+    value_category = case_when(
+      value == "Y" ~ "Yes",
+      value == "OR" ~ "Partial/On Request",
+      value == "P" ~ "Partial/On Request",
+      value == "N" ~ "No",
+      value == "NA" ~ "No",
+      TRUE ~ "Yes"  # Spatial data types get "Yes" color (they exist)
+    ),
+    # Create ordered factor for the legend
+    value_category = factor(value_category, 
+                           levels = c("No", "Partial/On Request", "Yes")),
+    # Flag for spatial data types (for adding border)
+    is_spatial = category == "spatial" & !value %in% c("Y", "N", "OR", "P", "NA"),
+    # Clean up category names for display
+    category_label = case_when(
+      category == "public" ~ "Data publicly\navailable?",
+      category == "realm" ~ "Realm\nspecified?",
+      category == "spatial" ~ "Spatial data\ntype",
+      category == "active" ~ "Active vs\ninactive specified",
+      category == "species" ~ "Species\ninformation provided"
+    ),
+    # Create ordered factor for categories
+    category_label = factor(category_label, 
+                           levels = c("Data publicly\navailable?", 
+                                    "Realm\nspecified?", 
+                                    "Spatial data\ntype", 
+                                    "Active vs\ninactive specified", 
+                                    "Species\ninformation provided")),
+    # Order states
+    STATE = factor(STATE, levels = c("QLD", "NSW", "VIC", "TAS", "SA", "WA", "NT"))
+  )
+
+# Create LAND plot
+p_land <- ggplot(land_data, aes(x = STATE, y = category_label)) +
+  # Add tiles for all values with color
+  geom_tile(aes(fill = value_category), 
+            color = "white", linewidth = 1) +
+  # Add text labels for all cells using display_value (full words)
+  geom_text(aes(label = display_value), 
+            size = 3.5, 
+            fontface = "bold",
+            color = "grey20") +
+  # Use mako color scale with lighter colors for better readability
+  scale_fill_viridis_d(option = "G",  # G is mako
+                       begin = 0.40,  # Start lighter (skip darkest colors)
+                       end = 0.95,    # End before the lightest
+                       name = "Response") +
+  # Labels and theme
+  labs(x = "State/Territory",
+       y = NULL,
+       title = "Land-based Aquaculture Data Availability by State") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 9, face = "bold"),
+    panel.grid = element_blank(),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    plot.title = element_text(size = 13, face = "bold", hjust = 0.5),
+    panel.background = element_rect(fill = "grey95", color = NA),
+    plot.margin = margin(10, 10, 10, 10)
+  )
+
+# Save LAND plot with new name
+ggsave(here("figures/data_availability_land_v4.png"), 
+       p_land, 
+       width = 10, 
+       height = 6, 
+       dpi = 300,
+       bg = "white")
+
+print("Separate data availability tables created successfully!")
+print("Saved as:")
+print("  - data_availability_marine_v4.png")
+print("  - data_availability_land_v4.png")
+```
+
+
+#alternative visualizations 
+
+
+```{r}
+# Load required libraries
+library(here)
+library(tidyverse)
+library(viridis)
+library(patchwork)  # For combining plots
+
+# Create the data
+data_availability <- tribble(
+  ~STATE, ~MARINE_public, ~LAND_public, ~MARINE_realm, ~LAND_realm, ~MARINE_spatial, ~LAND_spatial, ~MARINE_active, ~LAND_active, ~MARINE_species, ~LAND_species,
+  "QLD", "OR", "OR", "NA", "NA", "point (vector)", "cadastre number", "N", "NA", "Y", "P",
+  "NSW", "Y", "N", "Y", "NA", "polygon (vector)", "NA", "Y", "NA", "N", "NA",
+  "VIC", "Y", "N", "Y", "NA", "point (vector)", "NA", "N", "NA", "N", "NA",
+  "TAS", "Y", "N", "Y", "NA", "polygon (vector)", "NA", "N", "NA", "N", "NA",
+  "SA", "Y", "Y", "Y", "Y", "polygon (vector)", "polygon (vector)", "Y", "Y", "Y", "N",
+  "WA", "Y", "Y", "N", "N", "polygon (vector)", "polygon (vector)", "N", "NA", "N", "N",
+  "NT", "OR", "Y", "N", "N", "point (vector)", "point (vector)", "Y", "Y", "Y", "Y"
+)
+
+# ============================================================================
+# OPTION 1: Summary bar chart - Count of states with each response type
+# ============================================================================
+
+# Reshape data
+data_long <- data_availability %>%
+  pivot_longer(cols = -STATE, 
+               names_to = c("realm", "category"),
+               names_pattern = "(.*)_(.*)",
+               values_to = "value") %>%
+  mutate(
+    value_clean = case_when(
+      value == "Y" ~ "Yes",
+      value == "N" ~ "No",
+      value == "OR" ~ "On Request",
+      value == "P" ~ "Partial",
+       value == "NA" ~ "No",
+      TRUE ~ "Data exists"  # For spatial data types
+    ),
+    category_label = case_when(
+      category == "public" ~ "Data publicly available",
+      category == "realm" ~ "Realm specified",
+      category == "spatial" ~ "Spatial data type provided",
+      category == "active" ~ "Active/inactive specified",
+      category == "species" ~ "Species information provided"
+    ),
+    realm = factor(realm, levels = c("MARINE", "LAND"), labels = c("Marine", "Land"))
+  )
+
+# Count by category, realm, and response
+summary_counts <- data_long %>%
+  count(category_label, realm, value_clean) %>%
+  mutate(
+    value_clean = factor(value_clean, 
+                        levels = c("No", "Partial", "On Request", "Data exists", "Yes"))
+  )
+
+# Create stacked bar chart
+p1 <- ggplot(summary_counts, aes(x = category_label, y = n, fill = value_clean)) +
+  geom_col(position = "stack", color = "white", linewidth = 0.5) +
+  geom_text(aes(label = ifelse(n > 0, n, "")), 
+            position = position_stack(vjust = 0.5),
+            size = 3.5, 
+            fontface = "bold",
+            color = "grey20") +
+  scale_fill_viridis_d(option = "D", begin = 0.25, end = 0.95, direction = 1) +
+  facet_wrap(~realm, ncol = 1) +
+  coord_flip() +
+  labs(title = "Number of States/Territories by Data Availability Category",
+       subtitle = "Stacked bar chart showing response counts",
+       x = NULL,
+       y = "Number of States/Territories",
+       fill = "Response") +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 10),
+    strip.text = element_text(size = 11, face = "bold"),
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40")
+  )
+
+ggsave(here("figures/data_availability_summary_bars.png"), 
+       p1, 
+       width = 12, 
+       height = 8, 
+       dpi = 300,
+       bg = "white")
+
+# ============================================================================
+# OPTION 2: Dot plot showing which states have each feature
+# ============================================================================
+
+# Filter for "Yes" responses and create labels
+yes_data <- data_long %>%
+  filter(value_clean %in% c("Yes", "Data exists", "Partial", "On Request")) %>%
+  mutate(
+    STATE = factor(STATE, levels = c("NT", "WA", "SA", "TAS", "VIC", "NSW", "QLD"))
+  )
+
+p2 <- ggplot(yes_data, aes(x = category_label, y = STATE)) +
+  geom_point(aes(color = value_clean, shape = realm), size = 4, stroke = 1.5) +
+  scale_color_viridis_d(option = "D", begin = 0.4, end = 0.95) +
+  scale_shape_manual(values = c("Marine" = 16, "Land" = 17)) +
+  labs(title = "Which States Provide Each Type of Data?",
+       subtitle = "Showing only positive responses (Yes, Partial, On Request, or data exists)",
+       x = NULL,
+       y = "State/Territory",
+       color = "Response Type",
+       shape = "Realm") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 9),
+    axis.text.y = element_text(size = 10, face = "bold"),
+    panel.grid.major = element_line(color = "grey90"),
+    legend.position = "right",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40")
+  )
+
+ggsave(here("figures/data_availability_dot_plot.png"), 
+       p2, 
+       width = 12, 
+       height = 6, 
+       dpi = 300,
+       bg = "white")
+
+# ============================================================================
+# OPTION 3: Completeness score - Percentage of "Yes" responses by state
+# ============================================================================
+
+# Calculate completeness scores
+completeness <- data_long %>%
+  mutate(
+    score = case_when(
+      value_clean == "Yes" | value_clean == "Data exists" ~ 1,
+      value_clean == "Partial" | value_clean == "On Request" ~ 0.5,
+      value_clean == "No" ~ 0,
+      value_clean == "NA" ~ NA_real_
+    )
+  ) %>%
+  group_by(STATE, realm) %>%
+  summarise(
+    completeness_pct = mean(score, na.rm = TRUE) * 100,
+    .groups = "drop"
+  ) %>%
+  mutate(
+    STATE = factor(STATE, levels = c("NT", "WA", "SA", "TAS", "VIC", "NSW", "QLD"))
+  )
+
+p3 <- ggplot(completeness, aes(x = STATE, y = completeness_pct, fill = completeness_pct)) +
+  geom_col(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = sprintf("%.0f%%", completeness_pct)), 
+            vjust = -0.5,
+            size = 3.5, 
+            fontface = "bold") +
+  scale_fill_viridis_c(option = "D", begin = 0.25, end = 0.95) +
+  facet_wrap(~realm, ncol = 1) +
+  labs(title = "Data Completeness Score by State/Territory",
+       subtitle = "Percentage based on: Yes = 100%, Partial/On Request = 50%, No = 0%",
+       x = "State/Territory",
+       y = "Completeness Score (%)",
+       fill = "Score (%)") +
+  ylim(0, 105) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 10),
+    strip.text = element_text(size = 11, face = "bold"),
+    legend.position = "right",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40")
+  )
+
+ggsave(here("figures/data_availability_completeness.png"), 
+       p3, 
+       width = 12, 
+       height = 8, 
+       dpi = 300,
+       bg = "white")
+
+# ============================================================================
+# OPTION 4: Grouped bar chart - Direct comparison of Marine vs Land
+# ============================================================================
+
+# Count Yes/Partial/On Request responses
+positive_counts <- data_long %>%
+  filter(value_clean %in% c("Yes", "Data exists", "Partial", "On Request")) %>%
+  count(category_label, realm) %>%
+  complete(category_label, realm, fill = list(n = 0))
+
+p4 <- ggplot(positive_counts, aes(x = category_label, y = n, fill = realm)) +
+  geom_col(position = "dodge", color = "white", linewidth = 0.5) +
+  geom_text(aes(label = n), 
+            position = position_dodge(width = 0.9),
+            vjust = -0.5,
+            size = 3.5, 
+            fontface = "bold") +
+  scale_fill_viridis_d(option = "D", begin = 0.4, end = 0.8) +
+  labs(title = "Marine vs Land Data Availability Comparison",
+       subtitle = "Count of states with positive responses (Yes, Partial, On Request, or data exists)",
+       x = NULL,
+       y = "Number of States/Territories",
+       fill = "Realm") +
+  ylim(0, 8) +
+  coord_flip() +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 10),
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40")
+  )
+
+ggsave(here("figures/data_availability_marine_vs_land.png"), 
+       p4, 
+       width = 12, 
+       height = 6, 
+       dpi = 300,
+       bg = "white")
+
+# ============================================================================
+# OPTION 5: Radial/spider plot - Data quality profile by state
+# ============================================================================
+
+# Calculate category scores for each state
+state_scores <- data_long %>%
+  mutate(
+    score = case_when(
+      value_clean == "Yes" | value_clean == "Data exists" ~ 1,
+      value_clean == "Partial" | value_clean == "On Request" ~ 0.5,
+      value_clean == "No" ~ 0,
+      value_clean == "NA" ~ 0
+    )
+  ) %>%
+  group_by(STATE, realm, category_label) %>%
+  summarise(score = mean(score, na.rm = TRUE), .groups = "drop")
+
+p5 <- ggplot(state_scores, aes(x = category_label, y = score, group = STATE, color = STATE)) +
+  geom_polygon(aes(fill = STATE), alpha = 0.1, linewidth = 1) +
+  geom_point(size = 2) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25)) +
+  scale_color_viridis_d(option = "D", begin = 0.1, end = 0.9) +
+  scale_fill_viridis_d(option = "D", begin = 0.1, end = 0.9) +
+  facet_wrap(~realm, ncol = 2) +
+  coord_polar() +
+  labs(title = "Data Quality Profile by State/Territory",
+       subtitle = "Radar chart showing completeness across all categories",
+       x = NULL,
+       y = "Completeness Score",
+       color = "State",
+       fill = "State") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 8),
+    strip.text = element_text(size = 11, face = "bold"),
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40")
+  )
+
+ggsave(here("figures/data_availability_radar.png"), 
+       p5, 
+       width = 12, 
+       height = 8, 
+       dpi = 300,
+       bg = "white")
+
+# ============================================================================
+# Print summary statistics
+# ============================================================================
+
+print("Alternative visualizations created successfully!")
+print("")
+print("Files created:")
+print("1. data_availability_summary_bars.png - Stacked bar chart showing counts by response type")
+print("2. data_availability_dot_plot.png - Dot plot showing which states have each feature")
+print("3. data_availability_completeness.png - Completeness score by state")
+print("4. data_availability_marine_vs_land.png - Direct comparison of Marine vs Land")
+print("5. data_availability_radar.png - Radar chart showing quality profiles")
+print("")
+
+# Print some useful summary stats
+cat("\n=== SUMMARY STATISTICS ===\n\n")
+
+cat("States with publicly available MARINE data:\n")
+marine_public <- data_availability %>% filter(MARINE_public == "Y") %>% pull(STATE)
+cat(paste(marine_public, collapse = ", "), "\n\n")
+
+cat("States with publicly available LAND data:\n")
+land_public <- data_availability %>% filter(LAND_public == "Y") %>% pull(STATE)
+cat(paste(land_public, collapse = ", "), "\n\n")
+
+cat("States that specify if sites are ACTIVE/INACTIVE for MARINE:\n")
+marine_active <- data_availability %>% filter(MARINE_active == "Y") %>% pull(STATE)
+cat(paste(marine_active, collapse = ", "), "\n\n")
+
+cat("States that specify if sites are ACTIVE/INACTIVE for LAND:\n")
+land_active <- data_availability %>% filter(LAND_active == "Y") %>% pull(STATE)
+cat(paste(land_active, collapse = ", "), "\n\n")
+
+cat("States with complete species information for MARINE:\n")
+marine_species <- data_availability %>% filter(MARINE_species == "Y") %>% pull(STATE)
+cat(paste(marine_species, collapse = ", "), "\n\n")
+
+cat("Most complete state for MARINE aquaculture data: SA\n")
+cat("Most complete state for LAND aquaculture data: SA and NT (tie)\n")
+```
+
+#extra plots 
+#heatmap
+```{r}
+# ============================================================================
+# OPTION 5A: Heatmap showing completeness scores
+# ============================================================================
+p5a <- ggplot(state_scores, aes(x = STATE, y = category_label, fill = score)) +
+  geom_tile(color = "white", linewidth = 1) +
+  geom_text(aes(label = scales::percent(score, accuracy = 1)), 
+            color = "grey20", fontface = "bold", size = 3.5) +
+  scale_fill_viridis_c(option = "D", 
+                       begin = 0.1, 
+                       end = 0.95,
+                       labels = scales::percent,
+                       limits = c(0, 1)) +
+  facet_wrap(~realm, ncol = 2, scales = "free_y") +
+  labs(title = "Data Quality Profile by State/Territory",
+       subtitle = "Completeness score for each category",
+       x = "State/Territory",
+       y = NULL,
+       fill = "Completeness\nScore") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 10, face = "bold"),
+    axis.text.y = element_text(size = 9, face = "bold"),
+    strip.text = element_text(size = 12, face = "bold"),
+    legend.position = "right",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40"),
+    panel.grid = element_blank()
+  )
+
+ggsave(here("figures/data_availability_heatmap.png"), 
+       p5a, 
+       width = 12, 
+       height = 7, 
+       dpi = 300,
+       bg = "white")
+```
+
+#grouped chart by category 
+```{r}
+# ============================================================================
+# OPTION 5B: Grouped bar chart - easier to compare across states
+# ============================================================================
+p5b <- ggplot(state_scores, aes(x = STATE, y = score, fill = STATE)) +
+  geom_col(color = "white", linewidth = 0.3) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25), 
+                     labels = scales::percent) +
+  scale_fill_viridis_d(option = "D", begin = 0.1, end = 0.9) +
+  facet_grid(realm ~ category_label) +
+  labs(title = "Data Quality Profile by State/Territory",
+       subtitle = "Completeness score across data categories",
+       x = "State/Territory",
+       y = "Completeness Score",
+       fill = "State") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 8, face = "bold"),
+    axis.text.y = element_text(size = 8),
+    strip.text = element_text(size = 9, face = "bold"),
+    legend.position = "none",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40"),
+    panel.grid.major.x = element_blank()
+  )
+
+ggsave(here("figures/data_availability_grouped_bars.png"), 
+       p5b, 
+       width = 14, 
+       height = 8, 
+       dpi = 300,
+       bg = "white")
+```
+
+#faceted mini radars per state
+```{r}
+# ============================================================================
+# OPTION 5C: Small multiples radar - one per state (cleaner than overlapping)
+# ============================================================================
+p5c <- ggplot(state_scores, aes(x = category_label, y = score, 
+                                 group = realm, color = realm, fill = realm)) +
+  geom_polygon(alpha = 0.2, linewidth = 1.2) +
+  geom_point(size = 2.5) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.5)) +
+  scale_color_viridis_d(option = "D", begin = 0.2, end = 0.8, 
+                        name = "Realm") +
+  scale_fill_viridis_d(option = "D", begin = 0.2, end = 0.8,
+                       name = "Realm") +
+  facet_wrap(~STATE, ncol = 4) +
+  coord_polar() +
+  labs(title = "Data Quality Profile by State/Territory",
+       subtitle = "Radar charts comparing Marine vs Land data completeness",
+       x = NULL,
+       y = NULL) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(size = 7),
+    axis.text.y = element_text(size = 6),
+    strip.text = element_text(size = 11, face = "bold"),
+    legend.position = "bottom",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40")
+  )
+
+ggsave(here("figures/data_availability_radar_faceted.png"), 
+       p5c, 
+       width = 14, 
+       height = 10, 
+       dpi = 300,
+       bg = "white")
+```
+
+#lollipop chart 
+```{r}
+# ============================================================================
+# OPTION 5D: Lollipop chart showing scores
+# ============================================================================
+p5d <- ggplot(state_scores, aes(x = score, y = STATE, color = STATE)) +
+  geom_segment(aes(x = 0, xend = score, y = STATE, yend = STATE), 
+               color = "grey70", linewidth = 0.5) +
+  geom_point(size = 4) +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.25),
+                     labels = scales::percent) +
+  scale_color_viridis_d(option = "D", begin = 0.1, end = 0.9) +
+  facet_grid(realm ~ category_label, scales = "free_y", space = "free_y") +
+  labs(title = "Data Quality Profile by State/Territory",
+       subtitle = "Completeness across categories",
+       x = "Completeness Score",
+       y = NULL) +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 9, face = "bold"),
+    axis.text.x = element_text(size = 8),
+    strip.text = element_text(size = 9, face = "bold"),
+    legend.position = "none",
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 10, color = "grey40"),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank()
+  )
+
+ggsave(here("figures/data_availability_lollipop.png"), 
+       p5d, 
+       width = 14, 
+       height = 8, 
+       dpi = 300,
+       bg = "white")
+```
+
+#version v5 combined matrices
+```{r}
+# v5 — combined marine + land matrix with shared middle labels and shared legend
+library(here)
+library(tidyverse)
+library(viridis)
+library(patchwork)
+
+# Create the data (same as v4)
+data_availability <- tribble(
+  ~STATE, ~MARINE_public, ~LAND_public, ~MARINE_realm, ~LAND_realm, ~MARINE_spatial, ~LAND_spatial, ~MARINE_active, ~LAND_active, ~MARINE_species, ~LAND_species,
+  "QLD", "OR", "OR", "NA", "NA", "point (vector)", "cadastre number", "N", "NA", "Y", "P",
+  "NSW", "Y", "N", "Y", "NA", "polygon (vector)", "NA", "Y", "NA", "N", "NA",
+  "VIC", "Y", "N", "Y", "NA", "point (vector)", "NA", "N", "NA", "N", "NA",
+  "TAS", "Y", "N", "Y", "NA", "polygon (vector)", "NA", "N", "NA", "N", "NA",
+  "SA", "Y", "Y", "Y", "Y", "polygon (vector)", "polygon (vector)", "Y", "Y", "Y", "N",
+  "WA", "Y", "Y", "N", "N", "polygon (vector)", "polygon (vector)", "N", "NA", "N", "N",
+  "NT", "OR", "Y", "N", "N", "point (vector)", "point (vector)", "Y", "Y", "Y", "Y"
+)
+
+# Helper: same prep logic used for both realms — avoids duplicating your v4 block twice
+prep_realm_data <- function(data, realm_prefix) {
+  data %>%
+    select(STATE, starts_with(paste0(realm_prefix, "_"))) %>%
+    pivot_longer(cols = -STATE,
+                 names_to = "category",
+                 names_prefix = paste0(realm_prefix, "_"),
+                 values_to = "value") %>%
+    mutate(
+      display_value = case_when(
+  value == "Y"                ~ "Yes",
+  value == "N"                ~ "No",
+  value == "OR"               ~ "On\nRequest",    # <- two lines
+  value == "P"                ~ "Partial",
+  value == "NA"               ~ "No",
+  value == "polygon (vector)" ~ "polygon\n(vector)",
+  value == "point (vector)"   ~ "point\n(vector)",
+  value == "cadastre number"  ~ "cadastre\nnumber",
+  TRUE                        ~ value
+),
+value_category = case_when(
+  value == "Y"  ~ "Yes",
+  value == "OR" ~ "On Request",        # <- renamed
+  value == "P"  ~ "On Request",        # <- folded in
+  value == "N"  ~ "No",
+  value == "NA" ~ "No",
+  TRUE          ~ "Yes"
+),
+value_category = factor(value_category,
+                        levels = c("No", "On Request", "Yes")), 
+      category_label = case_when(
+        category == "public"  ~ "Data publicly\navailable?",
+        category == "realm"   ~ "Realm\nspecified?",
+        category == "spatial" ~ "Spatial data\ntype",
+        category == "active"  ~ "Active vs\ninactive specified",
+        category == "species" ~ "Species\ninformation provided"
+      ),
+      # Ordered so "Data publicly available?" sits at the BOTTOM of the matrix,
+      # matching your PPT mockup
+      category_label = factor(category_label,
+                              levels = rev(c("Data publicly\navailable?",
+                                             "Realm\nspecified?",
+                                             "Spatial data\ntype",
+                                             "Active vs\ninactive specified",
+                                             "Species\ninformation provided"))),
+      STATE = factor(STATE, levels = c("QLD", "NSW", "VIC", "TAS", "SA", "WA", "NT"))
+    )
+}
+
+marine_data <- prep_realm_data(data_availability, "MARINE")
+land_data   <- prep_realm_data(data_availability, "LAND")
+
+# Shared theme
+matrix_theme <- theme_minimal() +
+  theme(
+    axis.text.x      = element_text(size = 10, face = "bold"),
+    axis.text.y      = element_text(size = 9,  face = "bold"),
+    panel.grid       = element_blank(),
+    plot.title       = element_text(size = 13, face = "bold", hjust = 0.5),
+    panel.background = element_rect(fill = "grey95", color = NA),
+    plot.margin      = margin(10, 5, 10, 10)
+  )
+
+# 1. Drop y-axis labels from BOTH plots, bump cell text size
+p_land <- ggplot(land_data, aes(x = STATE, y = category_label)) +
+  geom_tile(aes(fill = value_category), color = "white", linewidth = 1) +
+  geom_text(aes(label = display_value), size = 4.5,   # was 3.5
+            fontface = "bold", color = "grey20", lineheight = 0.9) +
+  scale_fill_viridis_d(option = "G", begin = 0.40, end = 0.95,
+                       name = "Response",
+                       limits = c("No", "On Request", "Yes")) +
+  labs(x = "State/Territory", y = NULL, title = "Land-based Realm") +
+  matrix_theme +
+  theme(axis.text.y = element_blank(),
+        legend.position = "bottom", legend.direction = "horizontal")
+
+p_marine <- ggplot(marine_data, aes(x = STATE, y = category_label)) +
+  geom_tile(aes(fill = value_category), color = "white", linewidth = 1) +
+  geom_text(aes(label = display_value), size = 4.5,
+            fontface = "bold", color = "grey20", lineheight = 0.9) +
+  scale_fill_viridis_d(option = "G", begin = 0.40, end = 0.95,
+                       name = "Response",
+                       limits = c("No", "On Request", "Yes")) +
+  labs(x = "State/Territory", y = NULL, title = "Marine Realm") +
+  matrix_theme +
+  theme(axis.text.y = element_blank(),
+        legend.position = "bottom", legend.direction = "horizontal")
+
+# 2. A dedicated middle plot that just holds the category labels.
+#    Using the same factor + levels as the matrices, so patchwork aligns rows.
+label_levels <- rev(c("Data publicly\navailable?",
+                      "Realm\nspecified?",
+                      "Spatial data\ntype",
+                      "Active vs\ninactive specified",
+                      "Species\ninformation provided"))
+
+label_df <- data.frame(
+  y = factor(label_levels, levels = label_levels),
+  x = 1
+)
+
+p_labels <- ggplot(label_df, aes(x = x, y = y)) +
+  geom_text(aes(label = y), size = 4.2, fontface = "bold",
+            color = "grey20", lineheight = 0.95) +
+  scale_x_continuous(limits = c(0, 2), expand = c(0, 0)) +
+  theme_void() +
+  theme(plot.margin = margin(10, 0, 10, 0))
+
+# 3. Combine: land | labels | marine, with shared legend at the bottom
+p_combined <- p_land + p_labels + p_marine +
+  plot_layout(ncol = 3, widths = c(7, 2, 7), guides = "collect") +
+  plot_annotation(
+    theme = theme(
+      legend.position  = "bottom",
+      legend.title     = element_text(size = 14, face = "bold"),
+      legend.text      = element_text(size = 13),
+      legend.key.size  = unit(0.9, "cm"),      # bigger colour swatches
+      legend.spacing.x = unit(0.4, "cm")       # more breathing room between entries
+    )
+  )
+
+ggsave(here("figures/data_availability_combined_v5.png"),
+       p_combined,
+       width = 17, height = 6, dpi = 300, bg = "white")
+```
+

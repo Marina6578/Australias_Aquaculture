@@ -1,0 +1,971 @@
+---
+title: "3-QLD_marine_aquaculture_dataset"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+date: "2025-11-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# ==============================================================================
+# Create Polygon Buffers for Queensland Marine Aquaculture Farms
+# Using Australian Albers Equal Area Projection (EPSG:3577)
+# ==============================================================================
+# Author: Marina
+# Date: 2025-11-10
+# Description: Convert point locations to polygon areas using farm size data sourced by DAF/2023
+# ==============================================================================
+```
+
+# ==============================================================================
+# 0. upload packages or install if needed 
+# ==============================================================================
+```{r}
+#Install or upload packages
+
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(sf)
+library(ggplot2)
+library(units)
+library(here)
+```
+
+# ==============================================================================
+# 1. READ AND PARSE DATA
+# 2. CREATE POLYGONS USING AUSTRALIAN ALBERS (EPSG:3577)
+# 3. SAVE OUTPUTS IN MULTIPLE FORMATS
+# 4. SUMMARY STATISTICS
+# ==============================================================================
+```{r}
+# ==============================================================================
+# 1. READ AND PARSE DATA
+# ==============================================================================
+# Set your file path here
+file_path <- here("raw_data/QLD/Qld_Marine_Aqua_DAF.xlsx")
+
+cat("\n=== Reading Queensland Marine Aquaculture Data ===\n")
+
+# Read the Excel file
+raw_data <- read_excel(file_path, sheet = 1)
+
+# Parse the comma-separated data
+qld_aqua <- raw_data %>%
+  separate(col = 1, 
+           into = c("Authority_RAA", "Current_Status", "Species", "Oyster_area", 
+                    "Size_ha", "Latitude", "Longitude", "Depth", "System"),
+           sep = ",", extra = "merge") %>%
+  mutate(
+    # Convert numeric columns
+    Size_ha = as.numeric(Size_ha),
+    Latitude = as.numeric(Latitude),
+    Longitude = as.numeric(Longitude),
+    Depth = as.numeric(Depth),
+    # Clean text columns
+    Authority_RAA = trimws(Authority_RAA),
+    Current_Status = trimws(Current_Status),
+    Species = trimws(Species),
+    Oyster_area = trimws(Oyster_area),
+    System = trimws(System),
+    # Standardize species names
+    Species = case_when(
+      Species == "" ~ NA_character_,
+      Species == "Oyster" ~ "Oysters",
+      TRUE ~ Species
+    )
+  ) %>%
+  # Remove rows with missing coordinates
+  filter(!is.na(Latitude) & !is.na(Longitude))
+
+cat("Records loaded:", nrow(qld_aqua), "\n")
+cat("Records with size data:", sum(!is.na(qld_aqua$Size_ha)), "\n")
+cat("Records missing size data:", sum(is.na(qld_aqua$Size_ha)), "\n")
+
+# Create point spatial object in WGS84
+qld_aqua_points_wgs84 <- st_as_sf(qld_aqua, 
+                                  coords = c("Longitude", "Latitude"),
+                                  crs = 4326,
+                                  remove = FALSE)
+
+# ==============================================================================
+# 2. CREATE POLYGONS USING AUSTRALIAN ALBERS (EPSG:3577)
+# ==============================================================================
+
+cat("\n=== Creating polygon buffers using Australian Albers (EPSG:3577) ===\n")
+
+# Transform to Australian Albers Equal Area projection
+qld_aqua_albers <- st_transform(qld_aqua_points_wgs84, crs = 3577)
+
+# Calculate buffer radius from area
+# For a circle: Area = π × r²
+# Therefore: r = sqrt(Area / π)
+# Convert hectares to square meters (1 ha = 10,000 m²)
+
+qld_aqua_albers <- qld_aqua_albers %>%
+  mutate(
+    area_m2 = Size_ha * 10000,
+    buffer_radius_m = sqrt(area_m2 / pi)
+  )
+
+# Create circular polygon buffers for farms WITH size data
+qld_aqua_polygons_with_size <- qld_aqua_albers %>%
+  filter(!is.na(Size_ha)) %>%
+  mutate(
+    geometry = st_buffer(geometry, dist = buffer_radius_m),
+    size_source = "actual"
+  )
+
+# Create default buffers for farms WITHOUT size data (use 1 hectare default)
+default_area_ha <- 1.0
+default_radius_m <- sqrt(default_area_ha * 10000 / pi)
+
+qld_aqua_polygons_no_size <- qld_aqua_albers %>%
+  filter(is.na(Size_ha)) %>%
+  mutate(
+    Size_ha = default_area_ha,
+    area_m2 = default_area_ha * 10000,
+    buffer_radius_m = default_radius_m,
+    geometry = st_buffer(geometry, dist = default_radius_m),
+    size_source = "default"
+  )
+
+# Combine all polygons
+qld_aqua_polygons_albers <- bind_rows(
+  qld_aqua_polygons_with_size,
+  qld_aqua_polygons_no_size
+)
+
+# Calculate actual polygon areas for validation
+qld_aqua_polygons_albers <- qld_aqua_polygons_albers %>%
+  mutate(
+    polygon_area_m2 = as.numeric(st_area(geometry)),
+    polygon_area_ha = polygon_area_m2 / 10000,
+    area_difference_pct = if_else(
+      size_source == "actual",
+      ((polygon_area_ha - Size_ha) / Size_ha) * 100,
+      NA_real_
+    )
+  )
+
+cat("\nPolygon creation complete!\n")
+cat("Total farms with polygons:", nrow(qld_aqua_polygons_albers), "\n")
+cat("  - With actual size data:", sum(qld_aqua_polygons_albers$size_source == "actual"), "\n")
+cat("  - With default size:", sum(qld_aqua_polygons_albers$size_source == "default"), "\n")
+
+# Validation check
+mean_diff <- mean(abs(qld_aqua_polygons_albers$area_difference_pct), na.rm = TRUE)
+cat("\nArea validation (circular buffers):\n")
+cat("Mean area difference from input:", round(mean_diff, 4), "%\n")
+
+# ==============================================================================
+# 3. SAVE OUTPUTS IN MULTIPLE FORMATS
+# ==============================================================================
+
+cat("\n=== Saving outputs ===\n")
+
+# Create output directory
+output_dir <- here("output_data", "QLD_marine_sites")
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+# Save in Australian Albers (EPSG:3577) - for analysis
+st_write(qld_aqua_polygons_albers, 
+         file.path(output_dir, "qld_aquaculture_polygons_albers.shp"),
+         delete_dsn = TRUE, quiet = FALSE)
+
+st_write(qld_aqua_polygons_albers, 
+         file.path(output_dir, "qld_aquaculture_polygons_albers.geojson"),
+         delete_dsn = TRUE, quiet = FALSE)
+
+saveRDS(qld_aqua_polygons_albers, 
+        file.path(output_dir, "qld_aquaculture_polygons_albers.rds"))
+
+# Also save in WGS84 (EPSG:4326) - for web mapping and GEE
+qld_aqua_polygons_wgs84 <- st_transform(qld_aqua_polygons_albers, crs = 4326)
+
+st_write(qld_aqua_polygons_wgs84, 
+         file.path(output_dir, "qld_aquaculture_polygons_wgs84.shp"),
+         delete_dsn = TRUE, quiet = FALSE)
+
+st_write(qld_aqua_polygons_wgs84, 
+         file.path(output_dir, "qld_aquaculture_polygons_wgs84.geojson"),
+         delete_dsn = TRUE, quiet = FALSE)
+
+st_write(qld_aqua_polygons_wgs84, 
+         file.path(output_dir, "qld_aquaculture_polygons_wgs84.kml"),
+         delete_dsn = TRUE, quiet = FALSE)
+
+saveRDS(qld_aqua_polygons_wgs84, 
+        file.path(output_dir, "qld_aquaculture_polygons_wgs84.rds"))
+
+# Also save the original points for comparison
+st_write(st_transform(qld_aqua_points_wgs84, crs = 3577), 
+         file.path(output_dir, "qld_aquaculture_points_albers.shp"),
+         delete_dsn = TRUE, quiet = FALSE)
+
+st_write(qld_aqua_points_wgs84, 
+         file.path(output_dir, "qld_aquaculture_points_wgs84.geojson"),
+         delete_dsn = TRUE, quiet = FALSE)
+
+cat("\nFiles saved:\n")
+cat("Australian Albers (EPSG:3577) - recommended for analysis:\n")
+cat("  - qld_aquaculture_polygons_albers.shp\n")
+cat("  - qld_aquaculture_polygons_albers.geojson\n")
+cat("  - qld_aquaculture_polygons_albers.rds\n")
+cat("  - qld_aquaculture_points_albers.shp\n")
+cat("\nWGS84 (EPSG:4326) - for web/GEE:\n")
+cat("  - qld_aquaculture_polygons_wgs84.shp\n")
+cat("  - qld_aquaculture_polygons_wgs84.geojson\n")
+cat("  - qld_aquaculture_polygons_wgs84.kml\n")
+cat("  - qld_aquaculture_polygons_wgs84.rds\n")
+cat("  - qld_aquaculture_points_wgs84.geojson\n")
+
+# ==============================================================================
+# 4. SUMMARY STATISTICS
+# ==============================================================================
+
+cat("\n=== Summary Statistics ===\n\n")
+
+# Species distribution
+cat("Species distribution:\n")
+print(table(qld_aqua_polygons_albers$Species, useNA = "ifany"))
+
+# Total area by species
+area_by_species <- qld_aqua_polygons_albers %>%
+  st_drop_geometry() %>%
+  group_by(Species) %>%
+  summarise(
+    n_farms = n(),
+    total_area_ha = sum(polygon_area_ha, na.rm = TRUE),
+    mean_area_ha = mean(polygon_area_ha, na.rm = TRUE),
+    median_area_ha = median(polygon_area_ha, na.rm = TRUE)
+  ) %>%
+  arrange(desc(total_area_ha))
+
+cat("\n\nTotal area by species:\n")
+print(area_by_species, n = 20)
+
+# Overall statistics
+total_area_ha <- sum(qld_aqua_polygons_albers$polygon_area_ha, na.rm = TRUE)
+total_area_km2 <- total_area_ha / 100
+
+cat("\n\nTotal Queensland marine aquaculture coverage:\n")
+cat("  Total area:", round(total_area_ha, 2), "hectares\n")
+cat("  Total area:", round(total_area_km2, 2), "km²\n")
+
+# Size distribution
+cat("\n\nFarm size distribution (hectares):\n")
+print(summary(qld_aqua_polygons_albers$polygon_area_ha))
+```
+
+# ==============================================================================
+# 5. VISUALIZATIONS
+# 6. SPATIAL ANALYSIS EXAMPLES
+# ==============================================================================
+```{r}
+
+# 5. VISUALIZATIONS
+# ==============================================================================
+
+cat("\n=== Creating visualizations ===\n")
+
+# Map 1: Points vs Polygons comparison
+p1 <- ggplot() +
+  geom_sf(data = qld_aqua_polygons_albers, 
+          aes(fill = Species), 
+          alpha = 0.4, color = "gray30", size = 0.2) +
+  geom_sf(data = st_transform(qld_aqua_points_wgs84, crs = 3577), 
+          aes(color = Species), size = 0.8) +
+  scale_fill_brewer(palette = "Set2", na.value = "gray80", 
+                    name = "Species (polygons)") +
+  scale_color_brewer(palette = "Set2", na.value = "gray50", 
+                     name = "Species (points)") +
+  theme_minimal() +
+  labs(
+    title = "Queensland Marine Aquaculture: Points vs Polygons",
+    subtitle = paste0("N = ", nrow(qld_aqua_polygons_albers), " farms | Australian Albers projection"),
+    x = "Easting (m)",
+    y = "Northing (m)"
+  ) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 8)
+  )
+
+ggsave(file.path(output_dir, "map_1_points_vs_polygons.png"),
+       p1, width = 14, height = 10, dpi = 300)
+
+# Map 2: Polygons colored by size (log scale)
+p2 <- ggplot() +
+  geom_sf(data = qld_aqua_polygons_albers %>% filter(!is.na(polygon_area_ha)), 
+          aes(fill = polygon_area_ha), 
+          color = "gray30", size = 0.1) +
+  scale_fill_viridis_c(trans = "log10", 
+                       name = "Size (ha)", 
+                       option = "plasma",
+                       labels = scales::comma) +
+  theme_minimal() +
+  labs(
+    title = "Queensland Marine Aquaculture Farms by Size",
+    subtitle = paste0("N = ", nrow(qld_aqua_polygons_albers), " farms | Australian Albers projection"),
+    x = "Easting (m)",
+    y = "Northing (m)"
+  ) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 8)
+  )
+
+ggsave(file.path(output_dir, "map_2_polygons_by_size.png"),
+       p2, width = 14, height = 10, dpi = 300)
+
+# Map 3: Polygons by species
+p3 <- ggplot() +
+  geom_sf(data = qld_aqua_polygons_albers, 
+          aes(fill = Species), 
+          color = "gray20", size = 0.2, alpha = 0.7) +
+  scale_fill_brewer(palette = "Set2", na.value = "gray80") +
+  theme_minimal() +
+  labs(
+    title = "Queensland Marine Aquaculture Farms by Species",
+    subtitle = paste0("N = ", nrow(qld_aqua_polygons_albers), " farms | Australian Albers projection"),
+    x = "Easting (m)",
+    y = "Northing (m)"
+  ) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 14),
+    axis.text = element_text(size = 8)
+  )
+
+ggsave(file.path(output_dir, "map_3_polygons_by_species.png"),
+       p3, width = 14, height = 10, dpi = 300)
+
+# Map 4: Density by region (simple lat bins)
+qld_aqua_summary <- qld_aqua_polygons_albers %>%
+  st_drop_geometry() %>%
+  mutate(lat_bin = cut(Latitude, breaks = 10)) %>%
+  group_by(lat_bin) %>%
+  summarise(
+    n_farms = n(),
+    total_area_ha = sum(polygon_area_ha, na.rm = TRUE)
+  )
+
+p4 <- ggplot(qld_aqua_summary, aes(x = lat_bin, y = n_farms)) +
+  geom_col(fill = "steelblue", alpha = 0.7) +
+  theme_minimal() +
+  labs(
+    title = "Farm Distribution by Latitude",
+    x = "Latitude bin",
+    y = "Number of farms"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+ggsave(file.path(output_dir, "map_4_farm_distribution_latitude.png"),
+       p4, width = 10, height = 6, dpi = 300)
+
+cat("\nMaps saved:\n")
+cat("  - map_1_points_vs_polygons.png\n")
+cat("  - map_2_polygons_by_size.png\n")
+cat("  - map_3_polygons_by_species.png\n")
+cat("  - map_4_farm_distribution_latitude.png\n")
+
+# ==============================================================================
+# 6. SPATIAL ANALYSIS EXAMPLES
+# ==============================================================================
+
+cat("\n=== Spatial Analysis Examples ===\n\n")
+
+# Check for overlapping farms
+cat("Checking for overlapping farms...\n")
+intersections <- st_intersects(qld_aqua_polygons_albers)
+overlaps <- sapply(intersections, function(x) length(x) > 1)
+n_overlaps <- sum(overlaps)
+
+cat("Farms with potential overlaps:", n_overlaps, "\n")
+
+if (n_overlaps > 0) {
+  cat("\nNote: Some overlaps are expected due to circular buffer approximation\n")
+  cat("For precise overlap analysis, obtain actual lease boundaries\n")
+}
+
+# Regional summary (simple latitude-based regions)
+regional_summary <- qld_aqua_polygons_albers %>%
+  st_drop_geometry() %>%
+  mutate(
+    region = case_when(
+      Latitude >= -16 ~ "Far North Queensland",
+      Latitude >= -20 ~ "North Queensland",
+      Latitude >= -24 ~ "Central Queensland",
+      Latitude >= -26 ~ "South Queensland",
+      TRUE ~ "Southeast Queensland"
+    )
+  ) %>%
+  group_by(region) %>%
+  summarise(
+    n_farms = n(),
+    total_area_ha = sum(polygon_area_ha, na.rm = TRUE),
+    dominant_species = names(which.max(table(Species)))
+  ) %>%
+  arrange(desc(total_area_ha))
+
+cat("\n\nRegional summary:\n")
+print(regional_summary, n = 20)
+
+# ==============================================================================
+# 7. QUICK RELOAD INSTRUCTIONS
+# ==============================================================================
+
+cat("\n=== Processing Complete! ===\n\n")
+cat("To quickly reload data in future R sessions:\n\n")
+cat('# Load polygons in Australian Albers (for analysis):\n')
+cat('qld_polygons <- readRDS("output/qld_aquaculture_polygons_albers.rds")\n\n')
+cat('# Or load in WGS84 (for web mapping):\n')
+cat('qld_polygons_wgs84 <- readRDS("output/qld_aquaculture_polygons_wgs84.rds")\n\n')
+cat('# Load points:\n')
+cat('qld_points <- st_read("output/qld_aquaculture_points_wgs84.geojson")\n\n')
+
+cat("\n=== IMPORTANT NOTES ===\n\n")
+cat("1. Polygons are CIRCULAR BUFFERS based on farm area\n")
+cat("   - This is a reasonable approximation for spatial analysis\n")
+cat("   - Actual farm shapes may vary\n\n")
+cat("2. Coordinate systems:\n")
+cat("   - Australian Albers (EPSG:3577): Use for area calculations and analysis\n")
+cat("   - WGS84 (EPSG:4326): Use for web mapping and Google Earth Engine\n\n")
+cat("3. Default size:\n")
+cat("   - Farms without size data: assigned 1 ha (default)\n")
+cat("   - These are flagged in 'size_source' column\n\n")
+cat("4. For Google Earth Engine:\n")
+cat("   - Upload: qld_aquaculture_polygons_wgs84.geojson\n")
+cat("   - Or: qld_aquaculture_points_wgs84.geojson for point-based analysis\n\n")
+```
+#if I want the food aquaculture apart from the other aquaculture such as pearls that are for jewelery etc...
+```{r}
+# ==============================================================================
+# Filter Queensland Aquaculture Data - Food Species Only
+# ==============================================================================
+# Create a food category column (recommended for analysis)
+# ==============================================================================
+qld_all <- readRDS(here('output_data/QLD_marine_sites/qld_aquaculture_polygons_albers.rds'))
+
+qld_categorized <- qld_all %>%
+  mutate(
+    aquaculture_type = case_when(
+      Species %in% c("Oysters", "Scallops", "Sea cucumbers") ~ "Food",
+      Species %in% c("Pearls", "Coral", "Sponges") ~ "Non-food",
+       is.na(Species) ~ "Unknown",
+      TRUE ~ "Other"
+    )
+  )
+
+# Summary by category
+cat("\n=== Aquaculture by Category ===\n")
+print(table(qld_categorized$aquaculture_type))
+
+#  easilier to filter what is food and what is not:
+qld_food <- qld_categorized %>%
+  filter(aquaculture_type == "Food")
+
+# ==============================================================================
+#Save filtered datasets
+# ==============================================================================
+
+ Shapefile (Albers)
+st_write(qld_food, 
+         here("output_data", "QLD_marine_sites", "qld_aquaculture_FOOD_ONLY_albers.shp"),
+         delete_dsn = TRUE, quiet = FALSE)
+
+# GeoJSON (Albers)
+st_write(qld_food, 
+         here("output_data", "QLD_marine_sites", "qld_aquaculture_FOOD_ONLY_albers.geojson"),
+         delete_dsn = TRUE, quiet = FALSE)
+
+# RDS (Albers)
+saveRDS(qld_food, 
+        here("output_data", "QLD_marine_sites","qld_aquaculture_FOOD_ONLY_albers.rds"))
+
+# Also save in WGS84 for GEE
+qld_food_wgs84 <- st_transform(qld_food, crs = 4326)
+
+st_write(qld_food_wgs84, 
+         here("output_data", "QLD_marine_sites", "qld_aquaculture_FOOD_ONLY_wgs84.geojson"),
+         delete_dsn = TRUE, quiet = FALSE)
+
+st_write(qld_food_wgs84, 
+         here("output_data", "QLD_marine_sites", "qld_aquaculture_FOOD_ONLY_wgs84.kml"),
+         delete_dsn = TRUE, quiet = FALSE)
+
+saveRDS(qld_food_wgs84,
+        here("output_data","QLD_marine_sites","qld_aquaculture_FOOD_ONLY_wgs84.rds"))
+
+
+# ==============================================================================
+# STATISTICS: Food aquaculture summary
+# ==============================================================================
+
+cat("\n=== Food Aquaculture Summary ===\n\n")
+
+# Total area
+total_food_area <- sum(qld_food$polygon_area_ha, na.rm = TRUE)
+cat("Total food aquaculture area:", round(total_food_area, 2), "hectares\n")
+cat("Total food aquaculture area:", round(total_food_area / 100, 2), "km²\n\n")
+
+# By species
+food_summary <- qld_food %>%
+  st_drop_geometry() %>%
+  group_by(Species) %>%
+  summarise(
+    n_farms = n(),
+    total_area_ha = sum(polygon_area_ha, na.rm = TRUE),
+    mean_area_ha = mean(polygon_area_ha, na.rm = TRUE),
+    median_area_ha = median(polygon_area_ha, na.rm = TRUE),
+    min_area_ha = min(polygon_area_ha, na.rm = TRUE),
+    max_area_ha = max(polygon_area_ha, na.rm = TRUE)
+  ) %>%
+  arrange(desc(total_area_ha))
+
+cat("Summary by food species:\n")
+print(food_summary)
+
+# Regional distribution of food aquaculture
+food_regional <- qld_food %>%
+  st_drop_geometry() %>%
+  mutate(
+    region = case_when(
+      Latitude >= -16 ~ "Far North Queensland",
+      Latitude >= -20 ~ "North Queensland",
+      Latitude >= -24 ~ "Central Queensland",
+      Latitude >= -26 ~ "South Queensland",
+      TRUE ~ "Southeast Queensland"
+    )
+  ) %>%
+  group_by(region, Species) %>%
+  summarise(
+    n_farms = n(),
+    total_area_ha = sum(polygon_area_ha, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(region, desc(total_area_ha))
+
+cat("\n\nFood aquaculture by region:\n")
+print(food_regional, n = 30)
+```
+
+
+```{r}
+# ==============================================================================
+# VISUALIZATION: Food aquaculture map
+# ==============================================================================
+# Load Australian states shapefile
+AUS_states <- st_read(here("raw_data/AustralianStates_SHP/STE_2021_AUST_GDA2020.shp")) %>%
+  st_transform(3577) %>%  # Transform to Australian Albers
+  st_make_valid()
+
+# Check the column name - it might be STE_NAME21 not STE_NAME1
+cat("Available columns:", paste(names(AUS_states), collapse = ", "), "\n")
+
+# Filter for Queensland
+# Note: The column is likely STE_NAME21, adjust if different
+QLD_boundary <- AUS_states %>%
+  filter(STE_NAME21 == "Queensland")  # Use STE_NAME21 or check your column name
+
+cat("Queensland boundary loaded\n")
+
+# Create figures folder if it doesn't exist
+if (!dir.exists(here("figures"))) {
+  dir.create(here("figures"), recursive = TRUE)
+}
+
+# MAP 1: Food aquaculture with Queensland boundary
+p1 <- ggplot() +
+  # Queensland boundary (base layer)
+  geom_sf(data = QLD_boundary, 
+          fill = "gray95", 
+          color = "gray30", 
+          size = 0.8) +
+  # Food aquaculture polygons
+  geom_sf(data = qld_food, 
+          aes(fill = Species, size = polygon_area_ha),
+          alpha = 0.6, 
+          color = "gray20",
+          stroke = 0.2) +
+  scale_fill_manual(values = c("Oysters" = "#2E86AB", "Scallops" = "#A23B72"),
+                    name = "Food Species") +
+  scale_size_continuous(name = "Area (ha)", 
+                       range = c(0.5, 5),
+                       trans = "log10") +
+  theme_minimal() +
+  labs(
+    title = "Queensland Food Aquaculture Farms",
+    subtitle = paste0("Oysters and Scallops | N = ", nrow(qld_food), " farms"),
+    x = "Easting (m)",
+    y = "Northing (m)"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    plot.subtitle = element_text(size = 12),
+    legend.position = "right",
+    panel.grid.major = element_line(color = "gray90", size = 0.3),
+    axis.text = element_text(size = 9)
+  )
+
+ggsave(here("figures", "qld_food_aquaculture_with_boundary.png"),
+       plot = p1, 
+       width = 14, 
+       height = 12, 
+       dpi = 300)
+
+cat("Map 1 saved: qld_food_aquaculture_with_boundary.png\n")
+
+# MAP 2: Just polygons, colored by species (cleaner version)
+p2 <- ggplot() +
+  geom_sf(data = QLD_boundary, 
+          fill = "aliceblue", 
+          color = "gray40", 
+          size = 0.6) +
+  geom_sf(data = qld_food, 
+          aes(fill = Species),
+          alpha = 0.7, 
+          color = "gray30",
+          size = 0.3) +
+  scale_fill_manual(values = c("Oysters" = "#2E86AB", "Scallops" = "#A23B72"),
+                    name = "Species") +
+  theme_minimal() +
+  labs(
+    title = "Queensland Food Aquaculture Distribution",
+    subtitle = paste0("N = ", nrow(qld_food), " farms"),
+    x = "Easting (m)",
+    y = "Northing (m)"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    legend.position = "right",
+    panel.grid.major = element_line(color = "gray90", size = 0.3)
+  )
+
+ggsave(here("figures", "qld_food_aquaculture_distribution.png"),
+       plot = p2, 
+       width = 14, 
+       height = 12, 
+       dpi = 300)
+```
+
+#other filtering tips so I can use to write the manuscript
+```{r}
+# ==============================================================================
+# QUICK REFERENCE GUIDE
+# ==============================================================================
+
+cat("\n=== QUICK REFERENCE: Filtering Commands ===\n\n")
+
+cat("# Load all data:\n")
+cat("qld_all <- readRDS('output/qld_aquaculture_polygons_albers.rds')\n\n")
+
+cat("# Filter for oysters only:\n")
+cat("oysters <- qld_all %>% filter(Species == 'Oysters')\n\n")
+
+cat("# Filter for all food species:\n")
+cat("food <- qld_all %>% filter(Species %in% c('Oysters', 'Scallops'))\n\n")
+
+cat("# Filter and save:\n")
+cat("st_write(food, 'output/food_only.geojson', delete_dsn = TRUE)\n\n")
+
+cat("# Filter by size (e.g., farms > 10 ha):\n")
+cat("large_oysters <- qld_all %>%\n")
+cat("  filter(Species == 'Oysters' & polygon_area_ha > 10)\n\n")
+
+cat("# Filter by region AND species:\n")
+cat("se_qld_oysters <- qld_all %>%\n")
+cat("  filter(Species == 'Oysters' & Latitude < -26)\n\n")
+
+```
+
+# Improved Map - Making Aquaculture Farms Visible
+```{r}
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(here)
+library(cowplot)  # For combining plots
+
+# Load data
+QLD_boundary <- readRDS(here("output_data","QLD_marine_sites", "qld_boundary_albers.rds"))
+qld_food <- readRDS(here("output_data","QLD_marine_sites", "qld_aquaculture_FOOD_ONLY_albers.rds"))
+# Or if you haven't saved it separately:
+qld_all <- readRDS(here("output_data","QLD_marine_sites", "qld_aquaculture_polygons_albers.rds"))
+qld_food <- qld_all %>% filter(Species %in% c("Oysters", "Scallops"))
+
+# Create figures folder
+if (!dir.exists(here("figures"))) {
+  dir.create(here("figures"), recursive = TRUE)
+}
+
+# ==============================================================================
+# SOLUTION 1: INCREASE POINT/POLYGON SIZE
+# ==============================================================================
+
+# Convert polygons to points for better visibility at state scale
+qld_food_points <- st_centroid(qld_food)
+
+p1 <- ggplot() +
+  geom_sf(data = QLD_boundary, 
+          fill = "gray98", 
+          color = "gray30", 
+          size = 0.6) +
+  # Use points instead of polygons for overview map
+  geom_sf(data = qld_food_points, 
+          aes(color = Species),
+          size = 3,  # Larger points
+          alpha = 0.8) +
+  scale_color_manual(values = c("Oysters" = "#2E86AB", "Scallops" = "#A23B72"),
+                     name = "Species") +
+  theme_minimal() +
+  labs(
+    title = "Queensland Food Aquaculture Distribution",
+    subtitle = paste0("N = ", nrow(qld_food), " farms (shown as points)"),
+    x = "Easting (m)",
+    y = "Northing (m)"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    legend.position = "right",
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 13),
+    panel.grid.major = element_line(color = "gray90", size = 0.3)
+  )
+
+ggsave(here("figures", "qld_food_aquaculture_POINTS.png"),
+       plot = p1, 
+       width = 14, 
+       height = 12, 
+       dpi = 300)
+
+cat("Map 1 saved: Points version for visibility\n")
+
+# ==============================================================================
+# SOLUTION 2: REGIONAL ZOOM MAPS
+# ==============================================================================
+
+# Identify main aquaculture regions
+regions <- qld_food %>%
+  st_drop_geometry() %>%
+  mutate(
+    region = case_when(
+      Latitude >= -12 & Latitude <= -10 ~ "Far North (Torres Strait)",
+      Latitude >= -17 & Latitude <= -15 ~ "North (Cairns area)",
+      Latitude >= -20 & Latitude <= -18 ~ "Central North",
+      Latitude >= -25 & Latitude <= -23 ~ "Central (Gladstone area)",
+      Latitude >= -28 & Latitude <= -26 ~ "South (Moreton Bay)",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  group_by(region) %>%
+  summarise(n = n()) %>%
+  filter(n > 5)  # Only regions with >5 farms
+
+print("Main aquaculture regions:")
+print(regions)
+
+# Create a faceted map by latitude bands
+qld_food_regions <- qld_food %>%
+  mutate(
+    lat_region = case_when(
+      Latitude >= -12 ~ "Far North (10-12°S)",
+      Latitude >= -20 ~ "North (12-20°S)",
+      Latitude >= -27 ~ "South (20-27°S)",
+      TRUE ~ "Southeast (27-28°S)"
+    ),
+    lat_region = factor(lat_region, 
+                       levels = c("Far North (10-12°S)", 
+                                 "North (12-20°S)", 
+                                 "South (20-27°S)", 
+                                 "Southeast (27-28°S)"))
+  )
+
+p2 <- ggplot() +
+  geom_sf(data = QLD_boundary, 
+          fill = "gray98", 
+          color = "gray30", 
+          size = 0.3) +
+  geom_sf(data = qld_food_regions, 
+          aes(fill = Species),
+          alpha = 0.7, 
+          color = "black",
+          size = 0.3) +
+  scale_fill_manual(values = c("Oysters" = "#2E86AB", "Scallops" = "#A23B72"),
+                    name = "Species") +
+  facet_wrap(~lat_region, ncol = 2) +
+  theme_minimal() +
+  labs(
+    title = "Queensland Food Aquaculture by Region",
+    subtitle = paste0("N = ", nrow(qld_food), " farms"),
+    x = "Easting (m)",
+    y = "Northing (m)"
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16),
+    strip.text = element_text(size = 11, face = "bold"),
+    legend.position = "bottom"
+  )
+
+ggsave(here("figures", "qld_food_aquaculture_BY_REGION.png"),
+       plot = p2, 
+       width = 16, 
+       height = 14, 
+       dpi = 300)
+
+cat("Map 2 saved: Regional faceted maps\n")
+
+# ==============================================================================
+# SOLUTION 3: DETAILED ZOOM ON MAIN AREAS
+# ==============================================================================
+
+# Find the 3 main concentration areas
+# Group farms by proximity
+farm_clusters <- qld_food %>%
+  mutate(
+    cluster = case_when(
+      Latitude >= -11 & Latitude <= -10 ~ "Torres Strait",
+      Latitude >= -17 & Latitude <= -15.5 ~ "Cairns Region",
+      Latitude >= -27.5 & Latitude <= -26.5 ~ "Moreton Bay",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  filter(cluster != "Other")
+
+# Get bounding boxes for each cluster with buffer
+create_cluster_map <- function(data, cluster_name, buffer_km = 50) {
+  
+  cluster_data <- data %>% filter(cluster == cluster_name)
+  
+  if(nrow(cluster_data) == 0) return(NULL)
+  
+  bbox <- st_bbox(cluster_data)
+  buffer_m <- buffer_km * 1000
+  
+  # Clip QLD boundary to area of interest
+  bbox_poly <- st_as_sfc(bbox) %>%
+    st_buffer(buffer_m)
+  qld_clip <- st_intersection(QLD_boundary, bbox_poly)
+  
+  ggplot() +
+    geom_sf(data = qld_clip, 
+            fill = "aliceblue", 
+            color = "gray40", 
+            size = 0.5) +
+    geom_sf(data = cluster_data, 
+            aes(fill = Species, size = polygon_area_ha),
+            alpha = 0.7, 
+            color = "black",
+            stroke = 0.3) +
+    scale_fill_manual(values = c("Oysters" = "#2E86AB", "Scallops" = "#A23B72"),
+                      name = "Species") +
+    scale_size_continuous(name = "Area (ha)", 
+                         range = c(1, 8),
+                         trans = "log10") +
+    coord_sf(xlim = c(bbox["xmin"] - buffer_m, bbox["xmax"] + buffer_m),
+             ylim = c(bbox["ymin"] - buffer_m, bbox["ymax"] + buffer_m)) +
+    theme_minimal() +
+    labs(
+      title = paste("Food Aquaculture:", cluster_name),
+      subtitle = paste0("N = ", nrow(cluster_data), " farms"),
+      x = "Easting (m)",
+      y = "Northing (m)"
+    ) +
+    theme(
+      plot.title = element_text(face = "bold", size = 14),
+      legend.position = "right"
+    )
+}
+
+# Create individual zoom maps
+p3a <- create_cluster_map(farm_clusters, "Torres Strait", buffer_km = 30)
+p3b <- create_cluster_map(farm_clusters, "Cairns Region", buffer_km = 40)
+p3c <- create_cluster_map(farm_clusters, "Moreton Bay", buffer_km = 40)
+
+if(!is.null(p3a)) {
+  ggsave(here("figures", "zoom_torres_strait.png"),
+         plot = p3a, width = 12, height = 10, dpi = 300)
+  cat("Map 3a saved: Torres Strait zoom\n")
+}
+
+if(!is.null(p3b)) {
+  ggsave(here("figures", "zoom_cairns_region.png"),
+         plot = p3b, width = 12, height = 10, dpi = 300)
+  cat("Map 3b saved: Cairns region zoom\n")
+}
+
+if(!is.null(p3c)) {
+  ggsave(here("figures", "zoom_moreton_bay.png"),
+         plot = p3c, width = 12, height = 10, dpi = 300)
+  cat("Map 3c saved: Moreton Bay zoom\n")
+}
+
+# ==============================================================================
+# SOLUTION 4: OVERVIEW + INSET MAPS COMBINED
+# ==============================================================================
+
+# Main overview map with boxes showing zoom areas
+bbox_torres <- if(nrow(filter(farm_clusters, cluster == "Torres Strait")) > 0) {
+  st_bbox(filter(farm_clusters, cluster == "Torres Strait")) %>%
+    st_as_sfc() %>% st_buffer(30000)
+} else NULL
+
+bbox_moreton <- if(nrow(filter(farm_clusters, cluster == "Moreton Bay")) > 0) {
+  st_bbox(filter(farm_clusters, cluster == "Moreton Bay")) %>%
+    st_as_sfc() %>% st_buffer(40000)
+} else NULL
+
+p4_main <- ggplot() +
+  geom_sf(data = QLD_boundary, 
+          fill = "gray98", 
+          color = "gray30", 
+          size = 0.6) +
+  geom_sf(data = qld_food_points, 
+          aes(color = Species),
+          size = 2.5,
+          alpha = 0.8) +
+  # Add boxes for inset areas
+  {if(!is.null(bbox_torres)) geom_sf(data = bbox_torres, fill = NA, color = "red", size = 1, linetype = "dashed")} +
+  {if(!is.null(bbox_moreton)) geom_sf(data = bbox_moreton, fill = NA, color = "blue", size = 1, linetype = "dashed")} +
+  scale_color_manual(values = c("Oysters" = "#2E86AB", "Scallops" = "#A23B72"),
+                     name = "Species") +
+  theme_minimal() +
+  labs(
+    title = "Queensland Food Aquaculture",
+    subtitle = "Overview with detailed zoom areas highlighted",
+    x = NULL, y = NULL
+  ) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    legend.position = "right",
+    axis.text = element_text(size = 8)
+  )
+
+ggsave(here("figures", "qld_overview_with_zoom_boxes.png"),
+       plot = p4_main, 
+       width = 14, 
+       height = 12, 
+       dpi = 300)
+
+cat("Map 4 saved: Overview with zoom area boxes\n")
+
+
+```
+
+#Use the output of this script to find aquaculture ifrastructure in Google Earth Engine in the Marine Farms of QLD (most other States have already datasets made that can be downloaded from the GOv web page)- THis file we used here can be ordered from DAF DEpartment of Aquaculture and Fisheries Queensland.
+
+

@@ -1,0 +1,256 @@
+---
+title: "18_status_check_vs_SA_and_NSW"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+date: "2026-04-24"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(sf)
+library(dplyr)
+library(here)
+
+sa_source <- st_read(here("output_data", "Australian_Aqua_sites",
+                          "SA_land_sites_with_species.shp"))
+
+combined  <- st_read(here("output_data", "summaries",
+                          "AU_aquaculture_combined.gpkg"))
+
+# Check the status column name/values first
+sa_source |> st_drop_geometry() |> count(status)   # adjust col name if different
+
+# CRS match
+if (st_crs(sa_source) != st_crs(combined)) {
+  sa_source <- st_transform(sa_source, st_crs(combined))
+}
+
+# Keep only SA-active source sites
+sa_active <- sa_source |>
+  filter(tolower(trimws(status)) == "active")
+
+# Flag whether each active site intersects anything in combined
+sa_active$detected <- lengths(st_intersects(sa_active, combined)) > 0
+
+# Summary
+sa_active |>
+  st_drop_geometry() |>
+  summarise(n_active   = n(),
+            n_detected = sum(detected),
+            pct        = mean(detected) * 100)
+
+
+```
+```{r}
+combined_sa_land <- combined |> filter(state == "SA", sector == "land")
+sa_active$detected <- lengths(st_intersects(sa_active, combined_sa_land)) > 0
+
+sa_active |> filter(!detected) |> mapview::mapview()
+
+sa_source$detected <- lengths(st_intersects(sa_source, combined_sa_land)) > 0
+
+sa_source |>
+  st_drop_geometry() |>
+  count(status, detected) |>
+  tidyr::pivot_wider(names_from = detected, values_from = n, values_fill = 0)
+```
+
+
+```{r}
+sa_source$detected <- lengths(st_intersects(sa_source, combined_sa_land)) > 0
+
+sa_source |>
+  st_drop_geometry() |>
+  count(status, detected) |>
+  tidyr::pivot_wider(names_from = detected,
+                     values_from = n,
+                     values_fill = 0,
+                     names_prefix = "detected_")
+```
+
+#chcek if NSW also has status
+```{r}
+library(sf)
+library(here)
+library(dplyr)
+
+nsw <- st_read(here("raw_data", "NSW", "NSW_aquaculture_leases_2025",
+                    "Aquaculture_Leases.shp"))
+
+# 1. What columns are in the attribute table?
+names(nsw)
+glimpse(nsw)
+
+# 2. Flag any columns whose NAME suggests status
+status_like <- names(nsw)[grepl("status|active|current|expir|valid|state|stage|lease_typ|type",
+                                 names(nsw), ignore.case = TRUE)]
+status_like
+
+# 3. For each flagged column, show unique values + counts
+for (col in status_like) {
+  cat("\n---", col, "---\n")
+  print(table(nsw[[col]], useNA = "ifany"))
+}
+
+# 4. Fallback: if no column name looks like status, scan ALL character columns
+#    for values like "active", "inactive", "current", "expired"
+char_cols <- names(nsw)[sapply(st_drop_geometry(nsw), is.character)]
+for (col in char_cols) {
+  vals <- unique(nsw[[col]])
+  hits <- vals[grepl("active|inactive|current|expir|valid|cancel|surrender",
+                     vals, ignore.case = TRUE)]
+  if (length(hits)) {
+    cat("\nColumn", col, "contains:", paste(hits, collapse = ", "), "\n")
+  }
+}
+```
+```{r}
+# Full breakdown of the column
+table(nsw$DB_Lease_I, useNA = "ifany")
+
+# Also sanity check — is this column really status, or is it an ID
+# that just happens to contain the word "Current"?
+head(nsw$DB_Lease_I, 20)
+n_distinct(nsw$DB_Lease_I)
+
+```
+
+```{r}
+nsw %>% 
+  st_drop_geometry() %>% 
+  count(DB_Lease_I) %>% 
+  mutate(pct = round(100 * n / sum(n), 1))
+
+```
+```{r}
+library(sf)
+library(dplyr)
+library(here)
+
+nsw <- st_read(here("raw_data", "NSW", "NSW_aquaculture_leases_2025",
+                    "Aquaculture_Leases.shp"))
+
+# Make sure we have a projected CRS for area calcs (GDA2020 / MGA zone 56 works for NSW)
+nsw_proj <- st_transform(nsw, 7856)
+
+# 1. Feature counts + total area by status
+nsw_proj %>%
+  mutate(area_ha = as.numeric(st_area(.)) / 10000) %>%
+  st_drop_geometry() %>%
+  group_by(DB_Lease_I) %>%
+  summarise(n_features = n(),
+            total_area_ha = round(sum(area_ha), 1),
+            mean_area_ha  = round(mean(area_ha), 2),
+            median_area_ha = round(median(area_ha), 2),
+            .groups = "drop") %>%
+  mutate(pct_area = round(100 * total_area_ha / sum(total_area_ha), 1))
+```
+```{r}
+library(sf)
+library(dplyr)
+library(here)
+
+# Load combined national dataset
+combined <- st_read(here("output_data", "summaries", 
+                          "AU_aquaculture_combined.gpkg"))
+
+# Quick peek — confirm the state column name and any status-like columns
+names(combined)
+glimpse(combined)
+
+# Subset to NSW (adjust the column name if it's not `state`)
+nsw_in_combined <- combined %>% filter(state == "NSW")   # or State / STATE / jurisdiction
+
+cat("Features in raw NSW shapefile:     ", nrow(nsw), "\n")
+cat("  of which Current:                ", sum(nsw$DB_Lease_I == "Current"), "\n")
+cat("  of which Historic:               ", sum(nsw$DB_Lease_I == "Historic"), "\n")
+cat("  of which Available POAA:         ", sum(nsw$DB_Lease_I == "Available POAA"), "\n")
+cat("Features in AU_aquaculture_combined for NSW:", nrow(nsw_in_combined), "\n")
+```
+```{r}
+library(sf)
+library(dplyr)
+library(here)
+
+# Reproject raw NSW to match combined's CRS
+nsw_proj <- st_transform(nsw, st_crs(combined))
+nsw_in_combined <- combined %>% filter(state == "NSW")
+
+# Spatial join — pull DB_Lease_I onto each combined feature
+check_sp <- st_join(nsw_in_combined,
+                    nsw_proj %>% select(DB_Lease_I),
+                    join = st_intersects,
+                    largest = TRUE)
+
+# Cross-tab: your active flag vs NSW's raw status
+# (swap `active` for whatever you called the column — could be status, lease_status, etc.)
+names(nsw_in_combined)   # confirm the column name first
+table(check_sp$active, check_sp$DB_Lease_I, useNA = "ifany")
+
+```
+```{r}
+library(sf)
+library(dplyr)
+
+nsw_proj <- st_transform(nsw, st_crs(combined))
+nsw_in_combined <- combined %>% filter(state == "NSW")
+
+check_sp <- st_join(nsw_in_combined,
+                    nsw_proj %>% select(DB_Lease_I),
+                    join = st_intersects,
+                    largest = TRUE)
+
+check_sp %>%
+  st_drop_geometry() %>%
+  group_by(DB_Lease_I) %>%
+  summarise(
+    n_leases              = n(),
+    n_with_infra          = sum(infra_area_km2 > 0, na.rm = TRUE),
+    pct_with_infra        = round(100 * mean(infra_area_km2 > 0, na.rm = TRUE), 1),
+    total_infra_area_km2  = round(sum(infra_area_km2, na.rm = TRUE), 3),
+    median_infra_km2      = round(median(infra_area_km2[infra_area_km2 > 0], na.rm = TRUE), 4),
+    .groups = "drop"
+  )
+
+```
+```{r}
+check_sp %>% 
+  filter(is.na(DB_Lease_I)) %>% 
+  st_drop_geometry() %>% 
+  select(site_id, custodian_id, infra_area_km2, status) %>%
+  head(20)
+```
+
+```{r}
+poaa_detected <- check_sp %>% filter(DB_Lease_I == "Available POAA", status == "active")
+current_leases <- check_sp %>% filter(DB_Lease_I == "Current")
+
+# Distance from each detected POAA to nearest Current lease
+poaa_detected$dist_to_current <- st_distance(poaa_detected, current_leases) %>% 
+  apply(1, min) %>% 
+  as.numeric()
+
+summary(poaa_detected$dist_to_current)
+```
+```{r}
+# Do status and infra_area agree?
+nsw_in_combined %>%
+  st_drop_geometry() %>%
+  mutate(has_infra = infra_area_km2 > 0) %>%
+  count(status, has_infra)
+
+```
+```{r}
+# Where your detection says active, what does NSW say?
+check_sp %>% 
+  st_drop_geometry() %>% 
+  filter(status == "active") %>% 
+  count(DB_Lease_I)
+```
+

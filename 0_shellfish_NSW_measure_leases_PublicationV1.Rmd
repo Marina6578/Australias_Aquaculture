@@ -1,0 +1,122 @@
+---
+title: "0_measure_shellfish_farms"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+date: "2026-04-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+```{r}
+library(sf)
+library(dplyr)
+library(ggplot2)
+
+nsw_shellfish <- st_read("raw_data/NSW/NSW_aquaculture_leases_2025/Aquaculture_Leases.shp") |>
+   st_transform(3577)  # GDA94 / Australian Albers for area in m²
+
+nsw_shellfish$area_m2 <- as.numeric(st_area(nsw_shellfish))
+
+summary(nsw_shellfish$area_m2)
+quantile(nsw_shellfish$area_m2, c(0.05, 0.25, 0.5, 0.75, 0.95))
+```
+
+```{r}
+ggplot(nsw_shellfish, aes(x = area_m2)) +
+  geom_histogram(bins = 60, fill = "#4C72B0", colour = "white") +
+  geom_vline(xintercept = pi * 50^2, colour = "#C44E52", linewidth = 1) +
+  annotate("text", x = pi * 50^2, y = Inf, 
+           label = "50 m buffer\n(7,854 m²)", 
+           hjust = -0.1, vjust = 1.5, colour = "#C44E52") +
+  scale_x_log10(labels = scales::comma) +
+  labs(x = "Lease area (m², log scale)", y = "Number of leases",
+       title = "NSW aquaculture lease areas vs. 50 m buffer footprint") +
+  theme_minimal()
+```
+
+#sensitivity mention: because the distribution is skewed, the buffer under-represents the upper quartile of leases. Whether this matters depends on what you're using the buffered areas for — if it's national infrastructure accounting, you could note that total buffered area will be a conservative estimate of true national shellfish lease extent.
+
+```{r}
+library(sf)
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(here)
+
+# Read data using here()
+nsw_shellfish <- st_read(here("raw_data", "NSW", 
+                              "NSW_aquaculture_leases_2025",
+                              "Aquaculture_Leases.shp")) |>
+  st_transform(3577)
+
+nsw_shellfish$area_m2 <- as.numeric(st_area(nsw_shellfish))
+
+# Validation figure
+buffer_area <- pi * 50^2           # 7,854 m²
+median_area <- median(nsw_shellfish$area_m2)
+
+# Place labels at different heights using absolute y-positions
+# and move them to opposite sides so they don't overlap each other
+y_max <- max(ggplot_build(
+  ggplot(nsw_shellfish, aes(x = area_m2)) +
+    geom_histogram(bins = 50) +
+    scale_x_log10()
+)$data[[1]]$count)
+
+fig_validation <- ggplot(nsw_shellfish, aes(x = area_m2)) +
+  geom_histogram(bins = 50, fill = "#0072B2", colour = "white", alpha = 0.85) +
+  geom_vline(xintercept = buffer_area, colour = "#D55E00", linewidth = 0.8) +
+  geom_vline(xintercept = median_area, colour = "#009E73",
+             linewidth = 0.8, linetype = "dashed") +
+  # 50 m buffer label: right side of its line, upper area
+  annotate("text", x = buffer_area * 1.8, y = y_max * 0.95,
+           label = paste0("50 m buffer\n(", comma(round(buffer_area)), " m²)"),
+           hjust = 0, colour = "#D55E00", size = 3.2, lineheight = 0.9) +
+  # Median label: left side of its line, slightly lower
+  annotate("text", x = median_area / 1.8, y = y_max * 0.75,
+           label = paste0("Median lease\n(", comma(round(median_area)), " m²)"),
+           hjust = 1, colour = "#009E73", size = 3.2, lineheight = 0.9) +
+  scale_x_log10(labels = comma,
+                breaks = c(100, 1000, 10000, 100000, 1000000),
+                expand = expansion(mult = c(0.05, 0.08))) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  labs(x = expression("Lease area (m"^2*", log"[10]*" scale)"),
+       y = "Number of leases",
+       caption = paste0("NSW marine shellfish leases (n = ",
+                        nrow(nsw_shellfish), "). Source: NSW DPI, 2025.")) +
+  theme_minimal(base_size = 11) +
+  theme(plot.caption = element_text(hjust = 0, colour = "grey40", size = 8),
+        panel.grid.minor = element_blank())
+fig_validation
+
+# Save — here() wraps ONLY the path, then other args come after
+ggsave(here("figures", "SI_buffer_validation.png"),
+       plot = fig_validation,
+       width = 17, height = 10, units = "cm", dpi = 300)
+```
+```{r}
+nsw_shellfish |>
+  mutate(area_m2 = as.numeric(st_area(st_transform(geometry, 3577)))) |>
+  summarise(
+    n = n(),
+    n_below_100m2 = sum(area_m2 < 100),
+    n_above_100000m2 = sum(area_m2 > 100000)
+  )
+```
+
+```{r}
+nsw_shellfish |>
+  st_drop_geometry() |>
+  summarise(
+    n = n(),
+    n_below_100m2 = sum(area_m2 < 100),
+    n_above_100000m2 = sum(area_m2 > 100000)
+  )
+```
+

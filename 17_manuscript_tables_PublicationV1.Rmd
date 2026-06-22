@@ -1,0 +1,369 @@
+---
+title: "Manuscript tables — aquaculture production mapping"
+author: "Marina"
+date: "`r Sys.Date()`"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+output: html_document
+---
+
+## Overview
+
+This script builds all main-text and supplementary tables for the aquaculture
+production mapping manuscript from a single set of source files:
+
+- `combined_aquaculture_species_summaries.xlsx` — sector/species summaries
+- `concentration_gini_by_species_clean.csv` — species concentration (Gini)
+
+All outputs are written to `output_data/summaries/`. Rerun the chunks below
+whenever the underlying data is updated; the tables regenerate automatically.
+
+### Main-text table decision
+
+Two options are provided for the species-level main-text table(s). Run
+both, eyeball the outputs in Word, and pick one:
+
+- **Option A** — separate Table 3 (concentration) and Table 4 (production)
+- **Option B** — single combined Table 3 (concentration + production, 9 rows)
+
+Both are built below; keep whichever you prefer in the final manuscript and
+delete the other chunk(s).
+
+## Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(here)
+library(readr)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(tibble)
+
+# Source file paths — adjust if your project layout differs
+xlsx_path <- here("output_data", "summaries",
+                  "combined_aquaculture_species_summaries.xlsx")
+gini_path <- here("output_data", "summaries",
+                  "concentration_gini_by_species_clean.csv")
+
+# Output folder
+out_dir <- here("output_data", "summaries")
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
+```
+
+## Table 3 — Species concentration (Option A main text)
+
+Paired with Figure 3. Gini values rounded to 2 dp; species capitalisation
+normalised for publication.
+
+```{r table3-concentration, message=FALSE}
+table3_concentration <- read_csv(gini_path, show_col_types = FALSE) %>%
+  mutate(
+    gini_count = round(gini_count, 2),
+    gini_area  = round(gini_area, 2),
+    species = recode(species,
+      "Edible Oyster (aggregated)"          = "Edible oyster (aggregated)",
+      "Atlantic Salmon"                     = "Atlantic salmon",
+      "Mussel (aggregated)"                 = "Mussel (aggregated)",
+      "Red Claw Crayfish"                   = "Red claw crayfish",
+      "Marine Finfish (Cobia, Groupers)"    = "Marine finfish (cobia, groupers)",
+      "Multiple (Barramundi, Prawn)"        = "Polyculture (barramundi + prawn)",
+      "Southern Bluefin Tuna (aggregated)"  = "Southern bluefin tuna (aggregated)",
+      "Murray Cod"                          = "Murray cod",
+      "aquarium"                            = "Aquarium",
+      "Barramundi (Cone Bay - Marine)"      = "Barramundi (Cone Bay)",
+      "Salmon"                              = "Salmon (land-based)"
+    )
+  ) %>%
+  arrange(desc(total_infra_km2))
+
+write_csv(table3_concentration, here(out_dir, "table3.csv"))
+```
+
+## Table 4 — Species × production summary (Option A main text)
+
+Species-level integration of detected infrastructure area, lease area, and
+ABARES-reported 2021–2022 production (tonnes and AUD).
+
+```{r table4-species-production, message=FALSE}
+species_production <- read_excel(xlsx_path, sheet = "Manuscript Table") %>%
+  select(
+    species              = Species,
+    infra_type           = `Infra type`,
+    total_infra_km2      = `Total infra area (km2)`,
+    land_infra_km2       = `Land infra (km2)`,
+    marine_infra_km2     = `Marine infra (km2)`,
+    lease_area_km2       = `Lease area (km2)`,
+    production_aud_2122  = `Production 2021-22 (AUD)`,
+    production_t_2122    = `Production 2021-22 (t)`,
+    states               = States,
+    states_detail        = `States detail`,
+    notes                = Notes
+  ) %>%
+  arrange(desc(total_infra_km2))
+
+# Sum ABARES-reported yabbies + marron production into Cherax spp.
+cherax_totals <- species_production %>%
+  filter(species %in% c("Yabbies", "Marron")) %>%
+  summarise(
+    aud_sum = sum(production_aud_2122, na.rm = TRUE),
+    t_sum   = sum(production_t_2122,   na.rm = TRUE)
+  )
+
+species_production <- species_production %>%
+  mutate(
+    production_aud_2122 = if_else(species == "Cherax spp.",
+                                  cherax_totals$aud_sum,
+                                  production_aud_2122),
+    production_t_2122   = if_else(species == "Cherax spp.",
+                                  cherax_totals$t_sum,
+                                  production_t_2122),
+    notes = if_else(
+      species == "Cherax spp.",
+      paste("Combined yabbies + marron (not distinguishable by satellite);",
+            "ABARES production summed across both species"),
+      notes
+    )
+  )
+
+write_csv(species_production, here(out_dir, "table4.csv"))
+```
+
+## Combined Table 3 (Option B main text — alternative to A)
+
+Single main-text table integrating concentration and production for the
+9 commercial species with matching data in both sources. Barramundi is
+land-based only (marine Cone Bay site had no 2021–22 ABARES production).
+
+Run this chunk as an *alternative* to the separate Table 3 + Table 4 above.
+
+```{r table3-combined, message=FALSE}
+# --- Harmonise species names across the two sources ---
+
+canonical_names <- tribble(
+  ~canonical_species,       ~table3_species,                      ~production_species,
+  "Edible oyster",          "Edible oyster (aggregated)",         "Oysters",
+  "Atlantic salmon",        "Atlantic salmon",                    "Salmon",
+  "Southern bluefin tuna",  "Southern bluefin tuna (aggregated)", "Southern Bluefin Tuna",
+  "Mussel",                 "Mussel (aggregated)",                "Mussels",
+  "Prawn",                  "Prawn",                              "Prawns",
+  "Barramundi",             "Barramundi",                         "Barramundi",
+  "Red claw crayfish",      "Red claw crayfish",                  "Red claw",
+  "Cherax spp.",            "Cherax spp.",                        "Cherax spp.",
+  "Abalone",                "Abalone",                            "Abalone"
+)
+
+# Pull concentration columns
+t3_sub <- table3_concentration %>%
+  inner_join(canonical_names, by = c("species" = "table3_species")) %>%
+  select(canonical_species, realm,
+         n_states_present, gini_count, gini_area,
+         dominant_state, dominant_share_pct,
+         total_infra_km2, n_detections_total)
+
+# Pull production columns
+
+t4_sub <- species_production %>%
+  inner_join(canonical_names, by = c("species" = "production_species")) %>%
+  select(canonical_species,
+         lease_area_km2,
+         production_t_2122,
+         production_aud_2122,
+         states_detail)            # <- added
+
+table3_combined <- t3_sub %>%
+  left_join(t4_sub, by = "canonical_species") %>%
+  rename(species = canonical_species) %>%
+  mutate(
+    notes = if_else(
+      species == "Barramundi",
+      "Land-based only; marine site (Cone Bay, WA) excluded — no 2021–22 ABARES production",
+      NA_character_
+    )
+  ) %>%
+  select(realm, species,
+         n_states_present, dominant_state, dominant_share_pct,
+         gini_count, gini_area,
+         total_infra_km2, lease_area_km2,
+         states_detail,              # <- added, placed near the state columns
+         production_t_2122, production_aud_2122,
+         n_detections_total, notes) %>%
+  arrange(desc(total_infra_km2))
+
+# Combine and format
+# ... canonical_names, t3_sub, t4_sub unchanged ...
+
+table3_combined <- t3_sub %>%
+  left_join(t4_sub, by = "canonical_species") %>%
+  rename(species = canonical_species) %>%
+  mutate(
+    notes = if_else(
+      species == "Barramundi",
+      "Land-based only; marine site (Cone Bay, WA) excluded — no 2021–22 ABARES production",
+      NA_character_
+    )
+  ) %>%
+  # round all numeric columns to 2 dp
+  mutate(across(where(is.numeric), \(x) round(x, 2))) %>%
+  # final column order + display names
+  select(
+    `realm`                          = realm,
+    `species`                        = species,
+    `number of states`               = n_states_present,
+    `gini count`                     = gini_count,
+    `gini area`                      = gini_area,
+    `dominant state`                 = dominant_state,
+    `dominant share pct`             = dominant_share_pct,
+    `infra area (km2)`               = total_infra_km2,
+    `lease area km2`                 = lease_area_km2,
+    `production weight (tonnes) 21-22` = production_t_2122,
+    `production AUD 21-22`           = production_aud_2122,
+    `active leases`                  = n_detections_total,
+    `states detail`                  = states_detail,
+    `notes`                          = notes
+  ) %>%
+  arrange(desc(`infra area (km2)`))
+
+write_csv(table3_combined,
+          here(out_dir, "table3_combined_species_summary.csv"))
+```
+
+
+```{r table3-combined, message=FALSE}
+## Supplementary — Sector × status lease summary
+
+#realm level summary of leases and detected infrastructure by activity status.
+#"Active" is defined as leases containing detected infrastructure (per Methods).
+```
+
+
+```{r table-s-sector-summary, message=FALSE}
+sector_summary <- read_excel(xlsx_path, sheet = "Area by Status") %>%
+  rename(realm = Sector) %>%
+  mutate(
+    Status = case_when(
+      Status == "Infrastructure detected"    ~ "Active",
+      Status == "No infrastructure detected" ~ "Inactive",
+      TRUE                                   ~ Status
+    ),
+    Detected_infra_km2 = replace_na(Detected_infra_km2, 0)
+  ) %>%
+  select(
+    realm,
+    status             = Status,
+    n_leases           = N,
+    lease_area_km2     = Lease_area_km2,
+    detected_infra_km2 = Detected_infra_km2
+  )
+
+totals <- sector_summary %>%
+  group_by(realm) %>%
+  summarise(
+    status             = "All",
+    n_leases           = sum(n_leases),
+    lease_area_km2     = sum(lease_area_km2),
+    detected_infra_km2 = sum(detected_infra_km2),
+    .groups = "drop"
+  )
+
+sector_summary_out <- bind_rows(sector_summary, totals) %>%
+  arrange(realm, factor(status, levels = c("Active", "Inactive", "All")))
+
+write_csv(sector_summary_out,
+          here(out_dir, "table_s_sector_lease_summary.csv"))
+```
+
+## Supplementary — Dormant lease capacity by state
+
+Dormant capacity = leased area with no detected infrastructure. Computed
+from the state-level active/inactive sheets for land-based and marine leases.
+
+```{r table-s-dormant-capacity, message=FALSE}
+land_state <- read_excel(xlsx_path, sheet = "Land by State (active-inactiv") %>%
+  select(state = State, land_inactive_km2 = inactive_lease_km2)
+
+marine_state <- read_excel(xlsx_path, sheet = "Marine by State (active-inact") %>%
+  select(state = State, marine_inactive_km2 = inactive_area_km2)
+
+dormant_capacity <- full_join(land_state, marine_state, by = "state") %>%
+  mutate(across(c(land_inactive_km2, marine_inactive_km2),
+                ~replace_na(.x, 0))) %>%
+  mutate(total_dormant_km2 = land_inactive_km2 + marine_inactive_km2) %>%
+  arrange(desc(total_dormant_km2))
+
+dormant_capacity %>%
+  mutate(pct_national = round(100 * total_dormant_km2 / sum(total_dormant_km2), 1))
+
+dormant_capacity_out <- dormant_capacity %>%
+  bind_rows(
+    summarise(
+      dormant_capacity,
+      state = "Total",
+      across(where(is.numeric), sum)
+    )
+  )
+
+write_csv(dormant_capacity_out,
+          here(out_dir, "dormant_lease_capacity_by_state.csv"))
+```
+
+## Supplementary — Land-based infrastructure by state × species
+
+```{r table-s-land-by-state, message=FALSE}
+land_by_state <- read_excel(xlsx_path, sheet = "Land by State") %>%
+  select(
+    species  = species_display,
+    state    = State,
+    n_sites,
+    land_area_km2
+  ) %>%
+  arrange(state, desc(land_area_km2))
+
+write_csv(land_by_state,
+          here(out_dir, "table_s_land_by_state_species.csv"))
+```
+
+## Supplementary — Marine infrastructure by state × species
+
+```{r table-s-marine-by-state, message=FALSE}
+marine_by_state <- read_excel(xlsx_path, sheet = "Marine Infra by State") %>%
+  select(
+    state           = state_lease,
+    species         = Species_standardized,
+    n_detections,
+    total_infra_km2
+  ) %>%
+  arrange(state, desc(total_infra_km2))
+
+write_csv(marine_by_state,
+          here(out_dir, "table_s_marine_by_state_species.csv"))
+```
+
+## Output summary
+
+After running all chunks, `output_data/summaries/` contains:
+
+| File                                      | Purpose                                  |
+|-------------------------------------------|------------------------------------------|
+| `table3.csv`                              | Option A — main Table 3 (concentration)  |
+| `table4.csv`                              | Option A — main Table 4 (production)     |
+| `table3_combined_species_summary.csv`     | Option B — single combined main table    |
+| `table_s_sector_lease_summary.csv`        | Supplementary (sector × status)          |
+| `dormant_lease_capacity_by_state.csv`     | Supplementary                            |
+| `table_s_land_by_state_species.csv`       | Supplementary                            |
+| `table_s_marine_by_state_species.csv`     | Supplementary                            |
+
+Once the main-text option is chosen, delete the unused chunk(s) and the
+corresponding CSV file(s) to keep the output folder tidy.
+
+## Notes
+
+- Species names with biological italics (e.g. *Cherax* spp.) are stored as
+  plain text in CSVs; apply italic formatting when building the final Word
+  tables.
+- Marine figures exclude pearl oyster leases (see Methods — outside the
+  study's food-aquaculture scope).
+- If source spatial data (`AU_aquaculture_clean.gpkg`) is updated, rebuild
+  the Excel summary first, then rerun this document.

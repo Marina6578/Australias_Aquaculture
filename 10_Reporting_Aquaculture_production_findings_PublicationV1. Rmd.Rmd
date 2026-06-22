@@ -1,0 +1,1074 @@
+---
+title: "10-Reporting_Aquaculture_production_findings"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+date: "2026-02-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+```{r}
+# =============================================================================
+# Combined Land + Marine Aquaculture Species Summary for Manuscript
+# =============================================================================
+
+library(sf)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(here)
+library(writexl)  # install.packages("writexl") if needed
+
+# State name to abbreviation mapping
+state_abbrev <- c(
+  "Queensland" = "QLD", "New_South_Wales" = "NSW", "New South Wales" = "NSW",
+  "South_Australia" = "SA", "South Australia" = "SA",
+  "Western_Australia" = "WA", "Western Australia" = "WA",
+  "Tasmania" = "TAS", "Northern_Territory" = "NT", "Northern Territory" = "NT",
+  "Victoria" = "VIC",
+  # Pass through if already abbreviated
+  "QLD" = "QLD", "NSW" = "NSW", "SA" = "SA", "WA" = "WA",
+  "TAS" = "TAS", "NT" = "NT", "VIC" = "VIC"
+)
+# --- 1. Load LAND-BASED data -------------------------------------------------
+
+message("=== Loading land-based data ===")
+land_sf <- st_read(here("output_data", "Land_Aquaculture_Vectors",
+                        "Australia_Land_Aquaculture_National.shp"))
+
+
+
+land_sf <- land_sf %>%
+  mutate(
+    pond_area_km2 = In_A_KM,
+    species_display = case_when(
+      !is.na(Spcs_cs) & Spcs_cs != "" & grepl("Multiple", Spcs_cs, ignore.case = TRUE) ~ "Multiple species",
+      !is.na(Spcs_cs) & Spcs_cs != "" ~ Spcs_cs,
+      TRUE ~ "Unknown species"
+    ),
+    is_hatchery = grepl("hatchery|hatcheries", Infr_ty, ignore.case = TRUE)
+  )
+
+message(paste("  Land sites loaded:", nrow(land_sf)))
+```
+
+#upload other marine leases to find the custodian id later
+```{r}
+# Read the original custodian marine lease files
+raw_nsw <- st_read(here("raw_data/NSW/NSW_aquaculture_leases_2025/Aquaculture_Leases.shp"), 
+                   quiet = TRUE)
+raw_sa  <- st_read(here("raw_data/SA/SA_AquacultureLeasesAndLicences_shp/AquacultureLeasesAndLicences_GDA2020.shp"), 
+                   quiet = TRUE)
+raw_tas <- st_read(here("raw_data/TAS/TAS_Aquaculture_leases/LIST_MARINE_LEASES_STATEWIDE/list_marine_leases_statewide.shp"), 
+                   quiet = TRUE)
+raw_vic <- st_read(here("raw_data/VIC/vic_aquaculture_features.shp"), 
+                   quiet = TRUE)
+raw_wa  <- st_read(here("raw_data/WA_Aquaculture_Sites/Aquaculture_Sites_DPIRD_001.shp"), 
+                   quiet = TRUE)
+raw_qld <- st_read(here("raw_data/QLD/QLD_leases_2024/QLD_all_leases_2024.shp"), 
+                   quiet = TRUE)
+
+# Print columns and first few rows of ID-like columns for each
+purrr::walk(
+  list(NSW = raw_nsw, SA = raw_sa, TAS = raw_tas, 
+       VIC = raw_vic, WA = raw_wa, QLD = raw_qld),
+  function(x) {
+    cat(sprintf("\n── %d rows, %d cols ──\n", nrow(x), ncol(x)))
+    print(names(x))
+  }
+)
+```
+
+
+```{r}
+
+purrr::iwalk(
+  list(
+    NSW = raw_nsw, 
+    SA  = raw_sa, 
+    TAS = raw_tas, 
+    VIC = raw_vic, 
+    WA  = raw_wa, 
+    QLD = raw_qld
+  ),
+  function(x, state) {
+    cat(sprintf("\n── %s (%d rows, %d cols) ──\n", state, nrow(x), ncol(x)))
+    cat("Columns:\n")
+    print(names(x))
+    cat("First few rows of potential ID columns:\n")
+    x %>% 
+      st_drop_geometry() %>% 
+      select(where(is.character)) %>% 
+      head(3) %>% 
+      print()
+  }
+)
+```
+
+#load marine data 
+
+```{r}
+# --- 2. Load MARINE data -----------------------------------------------------
+
+message("\n=== Loading marine data ===")
+
+marine_leases_sf <- st_read(here("output_data", "all_marine_leases_with_status.shp"))
+message(paste("  Marine leases loaded:", nrow(marine_leases_sf)))
+print(names(marine_leases_sf))
+
+# Load AU_marine_leases separately (richer version with are_km2)
+AU_marine_leases <- st_read(
+  here("output_data/marine_leases_status_results/all_marine_leases_with_status.shp")) %>%
+  st_transform("EPSG:3577") %>%
+  st_make_valid()%>%
+  mutate(stat_ls = recode(stat_ls, !!!state_abbrev)) 
+
+marine_infra_national <- read.csv(
+  here("output_data", "infrastructure_by_species", "national_species_totals.csv"),
+  stringsAsFactors = FALSE
+)
+
+marine_infra_by_state <- read.csv(
+  here("output_data", "infrastructure_by_species", "state_species_totals.csv"),
+  stringsAsFactors = FALSE
+) %>%
+  mutate(state_lease = recode(state_lease, !!!state_abbrev))
+
+message(paste("  Marine infrastructure species totals loaded:", nrow(marine_infra_national)))
+# --- 2b. Exclude Pearl Oysters (non-food) and NT marine leases ---------------
+
+message("\n=== Excluding Pearl Oysters (non-food) ===")
+
+pearl_removed_leases <- AU_marine_leases %>%
+  st_drop_geometry() %>%
+  filter(grepl("pearl", Spcs_st, ignore.case = TRUE)) %>%
+  summarise(n = n(), area_km2 = round(sum(are_km2, na.rm = TRUE), 3))
+
+pearl_removed_infra <- marine_infra_national %>%
+  filter(grepl("pearl", Species_standardized, ignore.case = TRUE)) %>%
+  summarise(n = n(), area_km2 = round(sum(total_infra_km2, na.rm = TRUE), 3))
+
+cat(sprintf(
+  "Removing %d pearl leases (%.3f km²) and %d pearl infra records (%.3f km²)\n",
+  pearl_removed_leases$n, pearl_removed_leases$area_km2,
+  pearl_removed_infra$n,  pearl_removed_infra$area_km2
+))
+
+AU_marine_leases <- AU_marine_leases %>%
+  filter(!grepl("pearl", Spcs_st, ignore.case = TRUE))
+
+marine_leases_sf <- marine_leases_sf %>%
+  filter(!grepl("pearl", Spcs_st, ignore.case = TRUE))
+
+marine_infra_national <- marine_infra_national %>%
+  filter(!grepl("pearl", Species_standardized, ignore.case = TRUE))
+
+marine_infra_by_state <- marine_infra_by_state %>%
+  filter(!grepl("pearl", Species_standardized, ignore.case = TRUE))
+
+# ── Remove NT marine leases (land-only state) ─────────────────────────────────
+message("\n=== Removing NT marine leases ===")
+message(sprintf("  Removing %d NT leases (%.2f km²)",
+  sum(AU_marine_leases$stat_ls == "NT"),
+  sum(AU_marine_leases$are_km2[AU_marine_leases$stat_ls == "NT"])))
+
+AU_marine_leases <- AU_marine_leases %>% filter(stat_ls != "NT")
+marine_leases_sf <- marine_leases_sf %>% filter(stat_ls != "NT")
+
+message(sprintf(
+  "  marine_leases_sf: %d remaining\n  AU_marine_leases: %d remaining\n  marine_infra_national: %d rows remaining",
+  nrow(marine_leases_sf), nrow(AU_marine_leases), nrow(marine_infra_national)
+))
+
+# --- 2c. Recover custodian IDs from raw state files via spatial join ----------
+
+message("\n=== Recovering marine custodian IDs from raw state files ===")
+
+# ── Read and standardise each state — filter to marine where possible ─────────
+raw_nsw_m <- raw_nsw %>%
+  st_transform("EPSG:3577") %>%
+  st_make_valid() %>%
+  mutate(custodian_id = as.character(Lease_No), state_src = "NSW") %>%
+  select(custodian_id, state_src, geometry)
+
+raw_sa_m <- raw_sa %>%
+  st_transform("EPSG:3577") %>%
+  st_make_valid() %>%
+  filter(land_based == 0 | is.na(land_based)) %>%  # keep marine only
+  mutate(custodian_id = as.character(reg_no), state_src = "SA") %>%
+  select(custodian_id, state_src, geometry)
+
+raw_tas_m <- raw_tas %>%
+  st_transform("EPSG:3577") %>%
+  st_make_valid() %>%
+  mutate(custodian_id = as.character(M_LEASE_NO), state_src = "TAS") %>%
+  select(custodian_id, state_src, geometry)
+
+raw_vic_m <- raw_vic %>%
+  st_transform("EPSG:3577") %>%
+  st_make_valid() %>%
+  mutate(custodian_id = as.character(NAME), state_src = "VIC") %>%
+  select(custodian_id, state_src, geometry)
+
+raw_wa_m <- raw_wa %>%
+  st_transform("EPSG:3577") %>%
+  st_make_valid() %>%
+  filter(grepl("marine|aqua|sea", site_typ, ignore.case = TRUE) | is.na(site_typ)) %>%
+  mutate(custodian_id = as.character(aqua_id), state_src = "WA") %>%
+  select(custodian_id, state_src, geometry)
+
+raw_qld_m <- raw_qld %>%
+  st_transform("EPSG:3577") %>%
+  st_make_valid() %>%
+  mutate(custodian_id = as.character(qldglb_), state_src = "QLD") %>%
+  select(custodian_id, state_src, geometry)
+
+# Bind all raw state marine files
+raw_marine_all <- bind_rows(
+  raw_nsw_m, raw_sa_m, raw_tas_m,
+  raw_vic_m, raw_wa_m, raw_qld_m
+) %>%
+  st_make_valid()
+
+message(sprintf("  Raw marine features for joining: %d", nrow(raw_marine_all)))
+
+# ── Spatial join: nearest feature match ───────────────────────────────────────
+# Use largest overlap rather than nearest to avoid cross-state matches
+# --- 2c. Recover custodian IDs -----------------------------------------------
+
+# ... all raw_nsw_m, raw_sa_m etc. code unchanged ...
+
+AU_marine_leases_cust <- AU_marine_leases %>%
+  st_join(
+    raw_marine_all %>% select(custodian_id, state_src),
+    join = st_nearest_feature,
+    left = TRUE
+  )
+
+recovered <- sum(!is.na(AU_marine_leases_cust$custodian_id))
+cat(sprintf("Custodian ID recovered for %d of %d marine leases (%.1f%%)\n",
+    recovered, nrow(AU_marine_leases),
+    recovered / nrow(AU_marine_leases) * 100))
+
+dupes <- sum(duplicated(AU_marine_leases_cust$lease_d))
+cat(sprintf("Duplicate lease_d after join: %d\n", dupes))
+if (dupes > 0) {
+  AU_marine_leases_cust <- AU_marine_leases_cust %>%
+    group_by(lease_d) %>% slice(1) %>% ungroup()
+}
+
+# ── Update AU_marine_leases ───────────────────────────────────────────────────
+AU_marine_leases <- AU_marine_leases_cust
+
+message("  AU_marine_leases updated with custodian_id")
+AU_marine_leases %>%
+  st_drop_geometry() %>%
+  select(lease_d, stat_ls, custodian_id, state_src) %>%
+  head(10) %>% print()
+
+
+# --- 3. Summarise LAND-BASED data --------------------------------------------
+
+message("\n=== Summarising land-based data ===")
+
+# Active sites with ponds only
+land_active <- land_sf %>%
+  filter(Infr_st == "active", pond_area_km2 > 0)
+
+# National totals
+land_national <- land_active %>%
+  st_drop_geometry() %>%
+  group_by(species_display) %>%
+  summarise(
+    n_sites      = n(),
+    land_area_km2 = round(sum(pond_area_km2, na.rm = TRUE), 3),
+    n_hatcheries = sum(is_hatchery, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(land_area_km2))
+
+# By state
+land_by_state <- land_active %>%
+  st_drop_geometry() %>%
+  group_by(species_display, State) %>%
+  summarise(
+    n_sites      = n(),
+    land_area_km2 = round(sum(pond_area_km2, na.rm = TRUE), 3),
+    .groups = "drop"
+  ) %>%
+  arrange(species_display, desc(land_area_km2))
+
+message("  Land national summary:")
+print(land_national, n = 20)
+
+# --- 4. Summarise MARINE data ------------------------------------------------
+
+message("\n=== Summarising marine data ===")
+
+# Marine lease areas by species (all leases, not just detected)
+# Need to handle truncated shapefile column names
+# The Species_standardized column may be truncated to Spcs_st or similar
+# Check and adapt:
+marine_species_col <- "Spcs_st"
+marine_state_col <- "stat_ls"
+
+if (length(marine_species_col) == 0) {
+  # Try to find it
+  message("  WARNING: Could not auto-detect Species_standardized column.")
+  message("  Available columns:")
+  print(names(marine_leases_sf))
+  message("  >>> UPDATE marine_species_col below manually <<<")
+  marine_species_col <- "Spcs_st"  # Common truncation - UPDATE IF NEEDED
+}
+marine_species_col <- marine_species_col[1]
+message(paste("  Using marine species column:", marine_species_col))
+
+# Calculate lease area
+marine_leases_sf <- marine_leases_sf %>%
+  mutate(lease_area_km2 = as.numeric(st_area(geometry)) / 1e6)
+
+marine_leases_sf <- marine_leases_sf %>%
+  mutate(stat_ls = recode(stat_ls, !!!state_abbrev))
+
+# Marine lease area by species (national)
+marine_lease_national <- marine_leases_sf %>%
+  st_drop_geometry() %>%
+  group_by(species = .data[[marine_species_col]]) %>%
+  summarise(
+    n_leases          = n(),
+    lease_area_km2    = round(sum(lease_area_km2, na.rm = TRUE), 3),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(lease_area_km2))
+
+# Marine lease area by species and state
+marine_lease_by_state <- marine_leases_sf %>%
+  st_drop_geometry() %>%
+  group_by(species = .data[[marine_species_col]], 
+           state = .data[[marine_state_col]]) %>%
+  summarise(
+    n_leases       = n(),
+    lease_area_km2 = round(sum(lease_area_km2, na.rm = TRUE), 3),
+    .groups = "drop"
+  ) %>%
+  arrange(species, desc(lease_area_km2))
+
+message("\n  Marine lease area by species (national):")
+print(marine_lease_national, n = 20)
+
+message("\n  Marine detected infrastructure by species (national):")
+print(marine_infra_national, n = 20)
+
+# --- 4b. Area by active/inactive status (lease + infrastructure) --------------
+
+message("\n=== Area by active/inactive status ===")
+
+# ── Land: all sites (not just those with ponds > 0) ──────────────────────────
+land_area_status <- land_sf %>%
+  st_drop_geometry() %>%
+  group_by(Infr_st) %>%
+  summarise(
+    n_sites          = n(),
+    lease_area_km2   = round(sum(Ls_A_KM,  na.rm = TRUE), 3),  # total site/lease area
+    infra_area_km2   = round(sum(In_A_KM,  na.rm = TRUE), 3),  # detected pond area
+    .groups = "drop"
+  )
+
+message("  Land area by status:")
+print(land_area_status)
+
+# Scalar values for inline text reporting
+land_active_n_all       <- land_area_status %>% filter(Infr_st == "active")   %>% pull(n_sites)
+land_inactive_n         <- land_area_status %>% filter(Infr_st == "inactive") %>% pull(n_sites)
+land_active_lease_km2   <- land_area_status %>% filter(Infr_st == "active")   %>% pull(lease_area_km2)
+land_inactive_lease_km2 <- land_area_status %>% filter(Infr_st == "inactive") %>% pull(lease_area_km2)
+land_active_infra_km2   <- land_area_status %>% filter(Infr_st == "active")   %>% pull(infra_area_km2)
+
+cat(sprintf(
+  "\nLand active   (%d sites): lease area = %.2f km², detected pond area = %.2f km²\n",
+  land_active_n_all, land_active_lease_km2, land_active_infra_km2
+))
+cat(sprintf(
+  "Land inactive (%d sites): lease area = %.2f km² (no ponds detected)\n",
+  land_inactive_n, land_inactive_lease_km2
+))
+
+# ── Marine: by detection status ───────────────────────────────────────────────
+# lease_area_km2 was already computed from geometry at line 144
+marine_area_status <- marine_leases_sf %>%
+  st_drop_geometry() %>%
+  group_by(hs_dtct, stts_lb) %>%
+  summarise(
+    n_leases       = n(),
+    lease_area_km2 = round(sum(lease_area_km2, na.rm = TRUE), 3),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(hs_dtct))
+
+message("\n  Marine area by detection status:")
+print(marine_area_status)
+
+marine_present_n     <- marine_area_status %>% filter(hs_dtct == 1) %>% pull(n_leases)
+marine_absent_n      <- marine_area_status %>% filter(hs_dtct == 0) %>% pull(n_leases)
+marine_present_km2   <- marine_area_status %>% filter(hs_dtct == 1) %>% pull(lease_area_km2)
+marine_absent_km2    <- marine_area_status %>% filter(hs_dtct == 0) %>% pull(lease_area_km2)
+
+cat(sprintf(
+  "\nMarine infrastructure detected (%d leases): lease area = %.2f km²\n",
+  marine_present_n, marine_present_km2
+))
+cat(sprintf(
+  "Marine no infrastructure detected (%d leases): lease area = %.2f km²\n",
+  marine_absent_n, marine_absent_km2
+))
+
+# ── Combined summary table ────────────────────────────────────────────────────
+area_status_summary <- tibble(
+  Sector = c("Land-based", "Land-based", "Marine", "Marine"),
+  Status = c("Active", "Inactive",
+             "Infrastructure detected", "No infrastructure detected"),
+  N      = c(land_active_n_all, land_inactive_n,
+             marine_present_n,  marine_absent_n),
+  Lease_area_km2 = c(land_active_lease_km2, land_inactive_lease_km2,
+                     marine_present_km2,    marine_absent_km2),
+  # Land only: detected infrastructure footprint within the lease
+  Detected_infra_km2 = c(land_active_infra_km2, 0, NA, NA)
+)
+
+message("\n  Combined area-by-status summary:")
+print(area_status_summary)
+
+# --- 4c. Marine area summary for results text --------------------------------
+
+
+# Use AU_marine_leases which has the original are_km2 column
+marine_area_status <- AU_marine_leases %>%
+  st_drop_geometry() %>%
+  group_by(Infr_st) %>%
+  summarise(
+    n_leases       = n(),
+    lease_area_km2 = round(sum(are_km2, na.rm = TRUE), 3),
+    .groups = "drop"
+  )
+
+total_marine_n         <- sum(marine_area_status$n_leases)
+total_marine_lease_km2 <- round(sum(marine_area_status$lease_area_km2), 3)
+
+active_marine_n         <- marine_area_status %>% filter(Infr_st == "present") %>% pull(n_leases)
+active_marine_lease_km2 <- marine_area_status %>% filter(Infr_st == "present") %>% pull(lease_area_km2)
+
+active_marine_pct_n    <- round(active_marine_n / total_marine_n * 100, 1)
+active_marine_pct_area <- round(active_marine_lease_km2 / total_marine_lease_km2 * 100, 1)
+
+# ── Infrastructure footprint totals (from national species CSV) ───────────────
+total_infra_km2        <- round(sum(marine_infra_national$total_infra_km2, na.rm = TRUE), 3)
+infra_pct_total_lease  <- round(total_infra_km2 / total_marine_lease_km2 * 100, 2)
+infra_pct_active_lease <- round(total_infra_km2 / active_marine_lease_km2 * 100, 2)
+
+# ── Infrastructure by type: longlines vs cages (from SSRG detection files) ───
+ssrg_longlines <- st_read(here("output_data/SSRG_GEE_results/SSRG_shellfish_longlines_marine.shp")) %>%
+  st_transform("EPSG:3577") %>%
+  st_make_valid() %>%
+  mutate(infra_area_km2 = as.numeric(st_area(geometry)) / 1e6)
+
+ssrg_cages <- st_read(here("output_data/SSRG_GEE_results/SSRG_finfish_cages_marine.shp")) %>%
+  st_transform("EPSG:3577") %>%
+  st_make_valid() %>%
+  mutate(infra_area_km2 = as.numeric(st_area(geometry)) / 1e6)
+
+longline_km2 <- round(sum(ssrg_longlines$infra_area_km2), 3)
+cage_km2     <- round(sum(ssrg_cages$infra_area_km2), 3)
+type_total   <- round(longline_km2 + cage_km2, 3)
+longline_pct <- round(longline_km2 / type_total * 100, 1)
+cage_pct     <- round(cage_km2     / type_total * 100, 1)
+
+# Sanity check: type_total should be close to total_infra_km2
+cat(sprintf("Type total: %.3f km² | CSV total: %.3f km² | Difference: %.4f km²\n",
+            type_total, total_infra_km2, abs(type_total - total_infra_km2)))
+
+# ── Species attribution ───────────────────────────────────────────────────────
+assigned_km2   <- marine_infra_national %>%
+  filter(!is.na(Species_standardized) & Species_standardized != "") %>%
+  summarise(km2 = round(sum(total_infra_km2, na.rm = TRUE), 3)) %>% pull(km2)
+
+unassigned_km2 <- round(total_infra_km2 - assigned_km2, 3)
+assigned_pct   <- round(assigned_km2   / total_infra_km2 * 100, 1)
+unassigned_pct <- round(unassigned_km2 / total_infra_km2 * 100, 1)
+
+# ── Print results text ────────────────────────────────────────────────────────
+cat(sprintf(
+"Nationally, marine leases covered %.1f km². We classified %.1f%% (%d of %d) of marine
+leases as active, covering %.1f km² (%.1f%% of total marine lease area). Marine aquaculture
+infrastructure footprint was %.3f km², representing %.2f%% of the total licensed marine
+lease area (%.1f km²) and %.2f%% of the active lease area (%.1f km²). This footprint was
+dominated by longline systems (%.2f km²; %.1f%%), with cages accounting for %.2f km²
+(%.1f%%). Species attribution was possible for %.1f%% of the infrastructure area (%.3f km²),
+while %.1f%% (%.3f km²) remained unassigned.\n",
+  total_marine_lease_km2,
+  active_marine_pct_n, active_marine_n, total_marine_n,
+  active_marine_lease_km2, active_marine_pct_area,
+  total_infra_km2,
+  infra_pct_total_lease, total_marine_lease_km2,
+  infra_pct_active_lease, active_marine_lease_km2,
+  longline_km2, longline_pct,
+  cage_km2, cage_pct,
+  assigned_pct, assigned_km2,
+  unassigned_pct, unassigned_km2
+))
+
+# --- 4d. Inactive sites by state: expansion potential ------------------------
+# Safety filter — ensure NT is excluded regardless of upstream state
+AU_marine_leases <- AU_marine_leases %>% filter(stat_ls != "NT")
+marine_leases_sf  <- marine_leases_sf  %>% filter(stat_ls != "NT")
+
+# ── Land-based inactive sites by state ───────────────────────────────────────
+land_inactive_by_state <- land_sf %>%
+  st_drop_geometry() %>%
+  filter(Infr_st == "inactive") %>%
+  group_by(State) %>%
+  summarise(
+    n_inactive_sites  = n(),
+    inactive_lease_km2 = round(sum(Ls_A_KM, na.rm = TRUE), 3),
+    .groups = "drop"
+  ) %>%
+    arrange(desc(inactive_lease_km2))   
+
+# Active for context
+land_active_by_state <- land_sf %>%
+  st_drop_geometry() %>%
+  filter(Infr_st == "active") %>%
+  group_by(State) %>%
+  summarise(
+    n_active_sites   = n(),
+    active_lease_km2 = round(sum(Ls_A_KM, na.rm = TRUE), 3),
+    active_infra_km2 = round(sum(In_A_KM, na.rm = TRUE), 3),
+    .groups = "drop"
+  )
+
+land_by_state_full <- land_active_by_state %>%
+  full_join(land_inactive_by_state, by = "State") %>%
+  mutate(
+    total_sites          = coalesce(n_active_sites, 0L) + coalesce(n_inactive_sites, 0L),
+    inactive_pct_sites   = round(coalesce(n_inactive_sites, 0L) / total_sites * 100, 1),
+    inactive_pct_area    = round(coalesce(inactive_lease_km2, 0) /
+                           (coalesce(active_lease_km2, 0) + coalesce(inactive_lease_km2, 0)) * 100, 1)
+   ) %>%
+  arrange(desc(inactive_lease_km2))
+
+message("  Land inactive sites by state (sorted by inactive lease area):")
+print(land_by_state_full, n = 20)
+
+# ── Marine inactive leases by state ──────────────────────────────────────────
+marine_inactive_by_state <- AU_marine_leases %>%
+  st_drop_geometry() %>%
+  filter(Infr_st == "absent") %>%
+  group_by(stat_ls) %>%
+  summarise(
+    n_inactive_leases = n(),
+    inactive_area_km2 = round(sum(are_km2, na.rm = TRUE), 3),  # renamed
+    .groups = "drop"
+  ) %>%
+  arrange(desc(inactive_area_km2))
+
+marine_active_by_state <- AU_marine_leases %>%
+  st_drop_geometry() %>%
+  filter(Infr_st == "present") %>%
+  group_by(stat_ls) %>%
+  summarise(
+    n_active_leases  = n(),
+    active_area_km2  = round(sum(are_km2, na.rm = TRUE), 3),   # renamed
+    .groups = "drop"
+  )
+
+marine_by_state_full <- marine_active_by_state %>%
+  full_join(marine_inactive_by_state, by = "stat_ls") %>%
+  mutate(
+    total_leases        = coalesce(n_active_leases,  0L) + coalesce(n_inactive_leases, 0L),
+    total_area_km2      = round(coalesce(active_area_km2, 0) + coalesce(inactive_area_km2, 0), 3),
+    inactive_pct_leases = round(coalesce(n_inactive_leases, 0L) / total_leases * 100, 1),
+    inactive_pct_area   = round(coalesce(inactive_area_km2, 0) / total_area_km2 * 100, 1)
+  ) %>%
+  arrange(desc(inactive_area_km2)) %>%
+  rename(State = stat_ls)
+
+cat("\n── TOP STATES: inactive marine lease area ──\n")
+marine_by_state_full %>%
+  select(State, n_inactive_leases, inactive_area_km2, inactive_pct_leases) %>%
+  head(5) %>%
+  print()
+
+cat("\n── TOP STATES: inactive land-based lease area ──\n")
+land_by_state_full %>%
+  select(State, n_inactive_sites, lease_area_km2, inactive_pct_sites) %>%
+  head(5) %>%
+  print()
+
+# --- 5. Build state detail strings --------------------------------------------
+
+# Land states string
+land_states_str <- land_by_state %>%
+  group_by(species_display) %>%
+  summarise(
+    land_states_detail = paste0(State, " (", land_area_km2, " km2)", collapse = ", "),
+    land_states_list   = paste0(sort(unique(State)), collapse = ", "),
+    .groups = "drop"
+  )
+
+# Marine infrastructure states string (from CSV)
+marine_infra_states_str <- marine_infra_by_state %>%
+  group_by(Species_standardized) %>%
+  summarise(
+    marine_infra_states_detail = paste0(state_lease, " (", total_infra_km2, " km2)", collapse = ", "),
+    marine_infra_states_list   = paste0(sort(unique(state_lease)), collapse = ", "),
+    .groups = "drop"
+  )
+
+# Marine lease states string
+# Clean state names (remove underscores)
+marine_lease_states_str <- marine_lease_by_state %>%
+  mutate(state_clean = str_replace_all(state, "_", " ")) %>%
+  group_by(species) %>%
+  summarise(
+    marine_lease_states_detail = paste0(state_clean, " (", lease_area_km2, " km2)", collapse = ", "),
+    marine_lease_states_list   = paste0(sort(unique(state_clean)), collapse = ", "),
+    .groups = "drop"
+  )
+
+# --- 6. ABARES Production Data (2021-22) -------------------------------------
+
+abares_production <- tribble(
+  ~species_manuscript,          ~production_aud, ~production_tonnes,
+  "Southern Bluefin Tuna",      110400,          8322,
+  "Other finfish (marine)",     NA,              NA,
+  "Oysters",                    149671,          11735,
+  "Mussels",                    4984,            2173,
+  "Abalone",                    26285,           689,
+  "Yabbies",                    752,             21,
+  "Marron",                     4511,            113,
+  "Cherax spp.",                NA,              NA,
+  "Red claw",                   850,             31,
+  "Prawns",                     180821,          9450,
+  "Barramundi",                 60572,           4741,
+  "Salmon",                     1149408,         79271,
+  "Native finfish (land)",      NA,              NA,
+  "Murray Cod",                 NA,              NA,
+  "Lobster",                    NA,              NA,
+  "Unknown (land-based)",       NA,              NA,
+  "Hatcheries (land-based)",    NA,              NA,
+  "Multiple species (land)",    NA,              NA,
+  "Aquarium",                   NA,              NA,
+  "Rainbow Trout",              NA,              NA
+)
+
+# --- 7. Species mapping: LAND ------------------------------------------------
+# Maps land species_display names to manuscript names
+
+land_species_mapping <- tribble(
+  ~species_display,       ~species_manuscript,
+  "Prawn",                "Prawns",
+  "Cherax spp.",          "Cherax spp.",
+  "Unknown species",      "Unknown (land-based)",
+  "Barramundi",           "Barramundi",
+  "Red Claw Crayfish",    "Red claw",
+  "Native finfish",       "Native finfish (land)",
+  "Hatchery",             "Hatcheries (land-based)",
+  "Multiple species",     "Multiple species (land)",
+  "Abalone",              "Abalone",
+  "Murray Cod",           "Murray Cod",
+  "aquarium",             "Aquarium",
+  "Salmon",               "Salmon",
+  "Yabby",                "Yabbies",
+  "Rainbow Trout",        "Rainbow Trout",
+  "lobster",              "Lobster"
+)
+
+# --- 8. Species mapping: MARINE ----------------------------------------------
+# Maps marine Species_standardized names to manuscript names
+# >>> You may need to adjust the left column based on your actual values <<<
+
+marine_species_mapping <- tribble(
+  ~marine_species,                              ~species_manuscript,
+  "Edible Oyster (aggregated)",                 "Oysters",
+  "Pearl Oyster (non-food)",                    "Pearl Oyster (non-food)",
+  "Mussel (aggregated)",                        "Mussels",
+  "Blue Mussel",                                "Mussels",
+  "Atlantic Salmon",                            "Salmon",
+  "Southern Bluefin Tuna (aggregated)",         "Southern Bluefin Tuna",
+  "Southern Bluefin Tuna or Yellowtail Kingfish", "Southern Bluefin Tuna",
+  "Yellowtail Kingfish",                        "Other finfish (Kingfish)",
+  "Finfish",                                    "Other finfish (marine)",
+  "Barramundi (Cone Bay - Marine)",             "Barramundi",
+  "Pacific Oyster",                             "Oysters",
+  "Pacific Oyster or Blue Mussel",              "Oysters",
+  "Sydney Rock Oyster (predominant)",           "Oysters",
+  "Edible Oyster (Albany/Oyster Harbour)",       "Oysters",
+  "Pearl Oyster or Rock Oyster",                "Pearl Oyster (non-food)",
+  "Abalone",                                    "Abalone",
+  "Greenlip Abalone",                           "Abalone",
+  "Blacklip Abalone",                           "Abalone",
+  "Sea Cucumber",                               "Sea Cucumber",
+  "Lobster",                                    "Lobster"
+)
+
+# --- 9. Print unique marine species to verify mapping ------------------------
+
+message("\n=== MARINE Species_standardized values (verify mapping) ===")
+marine_species_unique <- marine_infra_national %>%
+  select(Species_standardized) %>%
+  arrange(Species_standardized)
+print(marine_species_unique, n = 30)
+
+message("\n=== MARINE lease species values ===")
+print(sort(unique(marine_lease_national$species)))
+
+# --- 10. Build the combined manuscript table ----------------------------------
+
+message("\n=== BUILDING COMBINED MANUSCRIPT TABLE ===")
+
+# A) Land infrastructure (ponds/tanks)
+land_for_table <- land_national %>%
+  left_join(land_species_mapping, by = "species_display") %>%
+  left_join(land_states_str, by = "species_display") %>%
+  filter(!is.na(species_manuscript)) %>%
+  select(species_manuscript,
+         land_n_sites     = n_sites,
+         land_infra_km2   = land_area_km2,
+         land_states_detail,
+         land_states_list)
+
+# B) Marine infrastructure (cages/longlines - DETECTED by SSRG)
+marine_infra_for_table <- marine_infra_national %>%
+  left_join(marine_species_mapping, 
+            by = c("Species_standardized" = "marine_species")) %>%
+  filter(!is.na(species_manuscript)) %>%
+  group_by(species_manuscript) %>%
+  summarise(
+    marine_infra_n     = sum(n_detections, na.rm = TRUE),
+    marine_infra_km2   = round(sum(total_infra_km2, na.rm = TRUE), 3),
+    .groups = "drop"
+  )
+
+# Marine infrastructure states with area detail
+marine_infra_states_mapped <- marine_infra_by_state %>%
+  left_join(marine_species_mapping, 
+            by = c("Species_standardized" = "marine_species")) %>%
+  filter(!is.na(species_manuscript)) %>%
+  mutate(state_clean = str_replace_all(state_lease, "_", " ")) %>%
+  group_by(species_manuscript, state_clean) %>%
+  summarise(
+    total_infra_km2 = round(sum(total_infra_km2, na.rm = TRUE), 3),
+    .groups = "drop"
+  ) %>%
+  group_by(species_manuscript) %>%
+  summarise(
+    marine_infra_states_detail = paste0(state_clean, " (", total_infra_km2, " km2)", collapse = ", "),
+    marine_infra_states_list   = paste0(sort(unique(state_clean)), collapse = ", "),
+    .groups = "drop"
+  )
+
+marine_infra_for_table <- marine_infra_for_table %>%
+  left_join(marine_infra_states_mapped, by = "species_manuscript")
+
+# C) Marine lease area (official lease footprint - contextual)
+marine_lease_for_table <- marine_lease_national %>%
+  left_join(marine_species_mapping, 
+            by = c("species" = "marine_species")) %>%
+  filter(!is.na(species_manuscript)) %>%
+  group_by(species_manuscript) %>%
+  summarise(
+    marine_lease_n      = sum(n_leases, na.rm = TRUE),
+    marine_lease_km2    = round(sum(lease_area_km2, na.rm = TRUE), 3),
+    .groups = "drop"
+  )
+
+# D) Combine: infrastructure area is PRIMARY, lease area is CONTEXTUAL
+manuscript_table <- abares_production %>%
+  left_join(land_for_table, by = "species_manuscript") %>%
+  left_join(marine_infra_for_table, by = "species_manuscript") %>%
+  left_join(marine_lease_for_table, by = "species_manuscript") %>%
+  mutate(
+    # Infrastructure type indicator
+    infra_type = case_when(
+      !is.na(land_infra_km2) & !is.na(marine_infra_km2) ~ "Land + Marine",
+      !is.na(land_infra_km2)  ~ "Land-based",
+      !is.na(marine_infra_km2) ~ "Marine",
+      TRUE ~ NA_character_
+    ),
+    
+    
+    # TOTAL infrastructure area (ponds + cages/longlines) - KEY METRIC
+    total_infra_km2 = round(
+      coalesce(land_infra_km2, 0) + coalesce(marine_infra_km2, 0), 3
+    ),
+    total_infra_km2 = if_else(total_infra_km2 == 0, NA_real_, total_infra_km2),
+    
+    # States detail combining land + marine with area breakdown
+    states_detail = case_when(
+      !is.na(land_states_detail) & !is.na(marine_infra_states_detail) ~
+        paste0("Land: ", land_states_detail, " | Marine: ", marine_infra_states_detail),
+      !is.na(land_states_detail) ~ land_states_detail,
+      !is.na(marine_infra_states_detail) ~ marine_infra_states_detail,
+      TRUE ~ NA_character_
+    ),
+    
+    # Simple states list (deduplicated)
+    all_states_list = purrr::map2_chr(
+      coalesce(land_states_list, ""),
+      coalesce(marine_infra_states_list, ""),
+      ~ {
+        all <- unique(trimws(unlist(str_split(paste(.x, .y, sep = ", "), ","))))
+        all <- all[all != ""]
+        if (length(all) == 0) return(NA_character_)
+        paste(sort(all), collapse = ", ")
+      }
+    )
+  ) %>%
+  select(
+    Species                      = species_manuscript,
+    `Infra type`                 = infra_type,
+    `Total infra area (km2)`     = total_infra_km2,
+    `Land infra (km2)`           = land_infra_km2,
+    `Marine infra (km2)`         = marine_infra_km2,
+    `Lease area (km2)`           = marine_lease_km2,
+    `Production 2021-22 (AUD)`   = production_aud,
+    `Production 2021-22 (t)`     = production_tonnes,
+    `States`                     = all_states_list,
+    `States detail`              = states_detail
+  )
+
+message("\n=== COMBINED MANUSCRIPT TABLE ===\n")
+manuscript_table <- manuscript_table %>%
+  mutate(
+    Notes = case_when(
+      Species == "Cherax spp." ~ "Combined Yabbies + Marron (not distinguishable by satellite)",
+      Species == "Yabbies"     ~ "Subset of Cherax spp. (ABARES only)",
+      Species == "Marron"      ~ "Subset of Cherax spp. (ABARES only)",
+      TRUE ~ NA_character_
+    )
+  )
+print(manuscript_table, n = 30, width = 150)
+
+# Also print a simplified version for quick reference
+message("\n=== SIMPLIFIED VIEW (key columns) ===\n")
+manuscript_table %>%
+  select(Species, `Infra type`, `Total infra area (km2)`, 
+         `Production 2021-22 (t)`, States) %>%
+  print(n = 30)
+
+
+
+```
+
+
+```{r}
+# ── Land-based lease area summary for results text ───────────────────────────
+
+land_area_status <- land_sf %>%
+  st_drop_geometry() %>%
+  group_by(Infr_st) %>%
+  summarise(
+    n_sites        = n(),
+    lease_area_km2 = round(sum(Ls_A_KM, na.rm = TRUE), 3),
+    infra_area_km2 = round(sum(In_A_KM, na.rm = TRUE), 3),
+    .groups = "drop"
+  )
+
+# Scalars
+total_n           <- sum(land_area_status$n_sites)
+total_lease_km2   <- round(sum(land_area_status$lease_area_km2), 3)
+
+active_n          <- land_area_status %>% filter(Infr_st == "active") %>% pull(n_sites)
+active_lease_km2  <- land_area_status %>% filter(Infr_st == "active") %>% pull(lease_area_km2)
+active_infra_km2  <- land_area_status %>% filter(Infr_st == "active") %>% pull(infra_area_km2)
+
+active_pct_n      <- round(active_n     / total_n          * 100, 1)
+active_pct_area   <- round(active_lease_km2 / total_lease_km2 * 100, 1)
+infra_pct_total   <- round(active_infra_km2 / total_lease_km2 * 100, 2)
+infra_pct_active  <- round(active_infra_km2 / active_lease_km2 * 100, 2)
+
+# --- Land-based results text (confirmed values) ------------------------------
+
+cat(sprintf(
+  "In total, there were 2,294.6 km² of area within terrestrial aquaculture leases
+in Australia. Of these, %.1f%% (%d of %d) were classified as active, covering
+1,764.8 km² (76.9%% of total lease area). The total infrastructure footprint
+covered 27.09 km², representing 1.18%% of the total licensed land-based lease
+area (2,294.6 km²) and 1.54%% of active lease area (1,764.8 km²).\n",
+  active_pct_n, active_n, total_n
+))
+```
+```{r}
+
+# --- 11. Save outputs --------------------------------------------------------
+output_dir <- here("output_data", "summaries")
+dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+
+marine_by_state_full_clean <- marine_by_state_full %>%
+  filter(!grepl("Northern", State, ignore.case = TRUE))  # catches any format
+
+write_xlsx(
+  list(
+    "Manuscript Table"                  = as.data.frame(manuscript_table),
+    "Area by Status"                    = as.data.frame(area_status_summary),
+    "Land by State (active-inactive)"   = as.data.frame(land_by_state_full),
+    "Marine by State (active-inactive)" = as.data.frame(marine_by_state_full_clean),
+    "Land National"                     = as.data.frame(land_national),
+    "Land by State"                     = as.data.frame(land_by_state),
+    "Marine Infra National"             = as.data.frame(marine_infra_national),
+    "Marine Infra by State"             = as.data.frame(marine_infra_by_state),
+    "Marine Lease National"             = as.data.frame(marine_lease_national),
+    "Marine Lease by State"             = as.data.frame(marine_lease_by_state)
+  ),
+  path = file.path(output_dir, "combined_aquaculture_species_summaries.xlsx")
+)
+
+message("  Saved: ", file.path(output_dir, "combined_aquaculture_species_summaries.xlsx"))
+```
+
+
+```{r}
+
+cat("land    site_id class:", class(land_combined$site_id), "\n")
+cat("marine  site_id class:", class(marine_combined$site_id), "\n")
+cat("lines   site_id class:", class(ssrg_longlines_combined$site_id), "\n")
+cat("cages   site_id class:", class(ssrg_cages_combined$site_id), "\n")
+```
+
+
+#COMbine land and marine datasets
+```{r}
+# --- 12. Combined land + marine spatial dataset (GeoPackage) -----------------
+
+# ── Land ──────────────────────────────────────────────────────────────────────
+land_combined <- land_sf %>%
+  mutate(
+    sector         = "Land-based",
+    site_id        = as.character(SiteID),  # force to character
+    custodian_id   = Cstd_ID,
+    region         = LGA,
+    group          = Taxon,
+    status         = Infr_st,
+    lease_area_km2 = Ls_A_KM,
+    infra_area_km2 = In_A_KM,
+    infra_type     = case_when(
+      grepl("pond",     Infr_ty, ignore.case = TRUE) ~ "ponds",
+      grepl("tank|ras", Infr_ty, ignore.case = TRUE) ~ "tanks/RAS",
+      TRUE ~ "unknown"
+    ),
+    species        = species_display,
+    state          = State
+  ) %>%
+  select(sector, site_id, custodian_id, region, group,
+         status, lease_area_km2, infra_area_km2,
+         infra_type, species, state, geometry)
+
+# ── Marine leases ─────────────────────────────────────────────────────────────
+marine_combined <- AU_marine_leases %>%
+  mutate(
+    sector         = "Marine",
+    site_id        = lease_d,
+    custodian_id   = custodian_id,   # recovered from raw state files in section 2c
+    region         = region,
+    group          = Group,
+    status         = case_when(
+      Infr_st == "present" ~ "active",
+      Infr_st == "absent"  ~ "inactive",
+      TRUE ~ Infr_st
+    ),
+    lease_area_km2 = are_km2,
+    infra_area_km2 = NA_real_,
+    infra_type     = NA_character_,
+    species        = Spcs_st,
+    state          = stat_ls
+  ) %>%
+  select(sector, site_id, custodian_id, region, group,
+         status, lease_area_km2, infra_area_km2,
+         infra_type, species, state, geometry)
+
+# ── Marine infrastructure: longlines ─────────────────────────────────────────
+ssrg_longlines_combined <- ssrg_longlines %>%
+  mutate(
+    sector         = "Marine",
+    site_id        = NA_character_,
+    custodian_id   = NA_character_,
+    region         = NA_character_,
+    group          = "Molluscs",
+    status         = "active",
+    lease_area_km2 = NA_real_,
+    infra_area_km2 = infra_area_km2,
+    infra_type     = "longline",
+    species        = NA_character_,
+    state          = State
+  ) %>%
+  select(sector, site_id, custodian_id, region, group,
+         status, lease_area_km2, infra_area_km2,
+         infra_type, species, state, geometry)
+
+# ── Marine infrastructure: cages ─────────────────────────────────────────────
+ssrg_cages_combined <- ssrg_cages %>%
+  mutate(
+    sector         = "Marine",
+    site_id        = NA_character_,
+    custodian_id   = NA_character_,
+    region         = NA_character_,
+    group          = "Fish",
+    status         = "active",
+    lease_area_km2 = NA_real_,
+    infra_area_km2 = infra_area_km2,
+    infra_type     = "cage",
+    species        = NA_character_,
+    state          = State
+  ) %>%
+  select(sector, site_id, custodian_id, region, group,
+         status, lease_area_km2, infra_area_km2,
+         infra_type, species, state, geometry)
+
+# ── Bind all layers ───────────────────────────────────────────────────────────
+AU_aquaculture_combined <- bind_rows(
+  land_combined           %>% mutate(site_id = as.character(site_id)),
+  marine_combined         %>% mutate(site_id = as.character(site_id)),
+  ssrg_longlines_combined %>% mutate(site_id = as.character(site_id)),
+  ssrg_cages_combined     %>% mutate(site_id = as.character(site_id))
+) %>%
+  st_make_valid()
+
+message(sprintf(
+  "Combined dataset: %d features\n  Land leases:   %d\n  Marine leases: %d\n  Longlines:     %d\n  Cages:         %d",
+  nrow(AU_aquaculture_combined),
+  nrow(land_combined),
+  nrow(marine_combined),
+  nrow(ssrg_longlines_combined),
+  nrow(ssrg_cages_combined)
+))
+
+# ── Sanity check ──────────────────────────────────────────────────────────────
+AU_aquaculture_combined %>%
+  st_drop_geometry() %>%
+  group_by(sector, status, infra_type) %>%
+  summarise(
+    n              = n(),
+    lease_area_km2 = round(sum(lease_area_km2, na.rm = TRUE), 3),
+    infra_area_km2 = round(sum(infra_area_km2, na.rm = TRUE), 3),
+    .groups = "drop"
+  ) %>%
+  print(n = 20)
+
+# ── Save as GeoPackage (full column names preserved) ─────────────────────────
+gpkg_path <- here("output_data", "summaries", "AU_aquaculture_combined.gpkg")
+
+st_write(AU_aquaculture_combined,
+         dsn        = gpkg_path,
+         layer      = "AU_aquaculture_combined",
+         delete_dsn = TRUE)
+
+message("  Saved: ", gpkg_path)
+message("  Column names fully preserved — ready for Shiny app")
+
+```

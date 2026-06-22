@@ -1,0 +1,1065 @@
+---
+title: "2_Insights_Land_based_Leases"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+#GitHub: Marina6578/Australias_Aquaculture
+
+date: "2025-09-29"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#upload libraries
+```{r}
+library(tmaptools)
+library(gridExtra)
+library(cowplot)
+library(tidyverse)
+library(here)
+library(tmap)
+library(sf)
+library(ggplot2)
+library(dplyr)
+library(stringr)
+library(purrr)
+library(terra)
+library(geodata)
+```
+
+
+#upload, make valid and reproject data
+```{r}
+Australia<-st_read(here("raw_data/Australia_country_SHP/AUS_2021_AUST_GDA2020.shp"))%>%
+  st_transform(, 3577)%>%
+  st_make_valid()
+
+AUS_states<-st_read(here("raw_data/AustralianStates_SHP/STE_2021_AUST_GDA2020.shp"))%>%
+  st_transform(, 3577)%>%
+  st_make_valid()
+
+australia_land <- st_read(here("output_data", "Australia_land.shp"))%>%
+  st_transform(, 3577)%>%
+  st_make_valid()
+```
+
+#upload, make valid and reproject data of aquaculture gathered from custodians of all the states in australia
+
+```{r}
+#STATES
+QLD_land_sites<-st_read(here("raw_data/QLD/QLD_land_sites_2025.shp"))%>%
+  st_transform(,3577)%>%
+  st_make_valid()
+NSW_marine_leases<- st_read(here("raw_data/NSW/NSW_Aquaculture_leases_2025/Aquaculture_Leases.shp"))%>%
+  st_transform(,3577)%>%
+  st_make_valid()
+SA_leases<- st_read(here("raw_data/SA/SA_AquacultureLeasesAndLicences_shp/AquacultureLeasesAndLicences_GDA2020.shp"))%>%
+  st_transform(,3577)%>%
+  st_make_valid()
+WA_leases <- st_read(here("raw_data/WA_Aquaculture_Sites/Aquaculture_Sites_DPIRD_001.shp")) %>%
+  st_set_crs(7844) %>%  # Set it as GDA2020 first
+  st_make_valid() %>%
+  st_transform(3577)
+TAS_marine_leases<- st_read(here("raw_data/TAS/TAS_Aquaculture_leases/LIST_MARINE_LEASES_STATEWIDE/list_marine_leases_statewide.shp"))%>%
+  st_transform(,3577)%>%
+  st_make_valid()
+NT_land_sites<- st_read(here("raw_data/NT/NT_Aquaculture/map_aqua.geojson"))%>%
+  st_transform(,3577)%>%
+  st_make_valid()
+VIC_marine_leases<-st_read(here("raw_data/VIC/vic_aquaculture_features.shp"))%>%
+  st_transform(,3577)%>%
+  st_make_valid()
+WA_land_sites<-st_read(here("output_data/Australian_Aqua_sites/WA_land_sites.shp"))%>%
+  st_transform(,3577)%>%
+  st_make_valid()
+
+```
+#upload land baed leases that we had to create polygon safter geocoding the location of addresses found online for land_based_leases (VIC, NSW and TAS)
+```{r}
+VIC_land_sites<- st_read(here("raw_data/VIC/Aquaculture_VIC_land_17oct.kml"))%>%
+  st_transform(,3577)%>%
+  st_make_valid()
+#plot(VIC_land_sites)
+```
+
+
+```{r}
+NSW_land_sites<- st_read (here("raw_data/NSW/Aquaculture_NSW_land_17oct.kml"))%>%
+  st_transform(,3577)%>%
+  st_make_valid()
+#plot(NSW_land_sites)
+```
+
+```{r}
+TAS_land_sites<- st_read(here("raw_data/TAS/TAS_land_based.kml"))%>%
+  st_transform(,3577)%>%
+  st_make_valid()
+#plot(TAS_land_sites)
+```
+
+```{r}
+# Rename specific columns
+NSW_land_sites <- NSW_land_sites %>%
+  rename(site_id = Name)
+
+VIC_land_sites<-VIC_land_sites%>%
+  rename(site_id = Name)
+  
+TAS_land_sites<-TAS_land_sites%>%
+ rename(site_id = Name)
+
+QLD_land_sites <- QLD_land_sites %>%
+  rename(site_id= qldglb_)
+  #mutate(site_id = paste0("QLD_land_based", row_number()))#this will be added later in code 7 
+```
+
+
+
+```{r}
+
+# Load and process SA leases (filter for land-based using reg_type)
+SA_land_sites <- SA_leases%>%
+  filter(grepl("Landbased", reg_type, ignore.case = TRUE)) %>%
+  mutate(site_id = paste0("SA_land_based_", row_number()))
+
+## Download SRTM for full Australia coverage
+
+aus_dem <- elevation_30s(country = "AUS", path = tempdir())
+
+# Create land mask (elevation > 0)
+land_mask <- aus_dem > 0
+
+# Convert to polygons
+australia_land <- as.polygons(land_mask, values = TRUE) %>%
+  st_as_sf() %>%
+  filter(AUS_elv_msk == 1) %>%  # Changed to correct column name
+  st_transform(3577) %>%
+  st_union() %>%
+  st_make_valid()
+
+# Filter WA leases for land-based sites using spatial intersection
+# Use centroid-based filtering with your current DEM # This is more accurate for coastal sites
+# Filter WA leases for land-based sites in one pipeline
+WA_land_sites <- WA_leases %>%
+  # Initial spatial filter - only sites that intersect land
+  mutate(centroid = st_centroid(geometry)) %>%
+  filter(st_intersects(centroid, australia_land, sparse = FALSE)[,1]) %>%
+  # Calculate metrics for final filtering
+  mutate(
+    site_area = st_area(geometry),
+    overlap_area = st_area(st_intersection(geometry, australia_land)),
+    pct_on_land = as.numeric(overlap_area / site_area) * 100,
+    elev_at_centroid = terra::extract(aus_dem, vect(centroid))[[2]]
+  ) %>%
+  # Apply elevation and land overlap thresholds
+  filter(
+    elev_at_centroid > 2 &    # Above tidal/intertidal zones
+    pct_on_land > 70           # Predominantly terrestrial
+  ) %>%
+  # Clean up and add site ID
+  select(-centroid, -site_area, -overlap_area) %>%
+  mutate(site_id = paste0("WA_land_based_", row_number()))
+
+```
+
+#Dictionary of terms that could be naming the aquacultured species
+```{r}
+library(dplyr)
+library(stringr)
+library(purrr)
+
+# === Define patterns grouped by aquaculture class ===
+species_groups <- list(
+  Bivalves = c(
+    "\\bgiant\\s*oyster\\b" = "Giant Oyster",
+    "\\brock\\s*oyster\\b" = "Rock Oyster",
+    "\\bsunshine\\s*oyster\\b" = "Sunshine Oyster (QSO)",
+    "\\bblue\\s*mussels?\\b" = "Blue Mussel",
+    "\\bgreenlip\\s*abalone\\b" = "Greenlip Abalone",
+    "\\bblacklip\\s*abalone\\b" = "Blacklip Abalone",
+    "\\babalones?\\b" = "Abalone"
+  ),
+  Fish = c(
+    "\\baustralian\\s*bass\\b" = "Australian Bass",
+    "\\bbarramundi\\b" = "Barramundi",
+    "\\bgolden\\s*perch\\b" = "Golden Perch",
+    "\\bmary\\s*river\\s*cod\\b" = "Mary River Cod",
+    "\\bsilver\\s*perch\\b" = "Silver Perch",
+    "\\bbrook\\s*trouts?\\b" = "Brook Trout",
+    "\\brainbow\\s*trouts?\\b" = "Rainbow Trout",
+    "\\bbrown\\s*trouts?\\b" = "Brown Trout",
+    "\\bsalmons?\\b" = "Salmon",
+    "\\bcobias?\\b" = "Cobia",
+    "\\bjade\\s*perch\\b" = "Jade Perch",
+    "\\bsouthern\\s*bluefin\\s*tunas?\\b" = "Southern Bluefin Tuna",
+    "\\byellowtail\\s*kingfish\\b" = "Yellowtail Kingfish",
+    "\\bsnappers?\\b" = "Snapper",
+    "\\bshort[- ]?fin\\s*eels?\\b" = "Shortfin Eel",
+    "\\blong[- ]?fin\\s*eels?\\b" = "Longfin Eel",
+    "\\bgrouper\\b" = "Grouper",
+    "\\bmurray\\s*cod\\b" = "Murray Cod",
+    "\\bcaviars?\\b" = "Caviar"
+  ),
+  Crustacean = c(
+    "\\bred\\s*claw\\s*crayfish\\b" = "Red Claw Crayfish",
+    "\\bred\\s*claws?\\b" = "Red Claw Crayfish",
+    "\\bblack\\s*tiger\\s*prawns?\\b" = "Black Tiger Prawn",
+    "\\bkuruma\\s*prawns?\\b" = "Kuruma Prawn",
+    "\\bprawns?\\b" = "Prawn",
+    "\\bmud\\s*crabs?\\b" = "Mud Crab",
+    "\\baustralian\\s*bay\\s*lobster\\b" = "Australian Bay Lobster",
+    "\\bmoreton\\s*bay\\s*bugs?\\b" = "Australian Bay Lobster",
+    "\\blobsters?\\b" = "Lobster",
+    "\\byabb(?:y|ies)\\b" = "Yabby",
+    "\\bmaroons?\\b" = "Marron"
+  ),
+  Other = c(
+    "\\bhatchery\\b" = "Hatchery"
+  )
+)
+
+# Flatten safely
+species_patterns <- purrr::flatten_chr(species_groups)
+
+```
+
+#function to detect species 
+```{r}
+detect_species <- function(desc, species_patterns) {
+  desc <- tolower(desc)
+  matched <- species_patterns[str_detect(desc, names(species_patterns))]
+  matched <- unique(matched)
+  
+  if (length(matched) == 0) {
+    return(NA_character_)
+  } else if (length(matched) == 1) {
+    return(matched)
+  } else {
+    return(paste0("Multiple (", paste(matched, collapse = ", "), ")"))
+  }
+}
+
+```
+
+# ==== Apply to NSW ====
+```{r}
+
+NSW_land_sites <- NSW_land_sites %>%
+  mutate(
+    description = tolower(as.character(Description)),
+    species = sapply(description, detect_species, species_patterns = species_patterns)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    group = case_when(
+      is.na(species) ~ NA_character_,
+      str_detect(species, "Oyster|Mussel|Abalone") ~ "Bivalve",
+      str_detect(species, "Bass|Barramundi|Perch|Cod|Trout|Salmon|Cobia|Tuna|Kingfish|Snapper|Eel|Grouper") ~ "Fish",
+      str_detect(species, "Crayfish|Prawn|Crab|Lobster|Yabby|Marron") ~ "Crustacean",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  ungroup() %>%
+  select(site_id, description, geometry, species, group)
+```
+
+# ==== Apply to VIC ====
+```{r}
+
+VIC_land_sites <- VIC_land_sites %>%
+  mutate(
+    description = tolower(as.character(Description)),
+    species = sapply(description, detect_species, species_patterns = species_patterns)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    group = case_when(
+      is.na(species) ~ NA_character_,
+      str_detect(species, "Oyster|Mussel|Abalone") ~ "Bivalve",
+      str_detect(species, "Bass|Barramundi|Perch|Cod|Trout|Salmon|Cobia|Tuna|Kingfish|Snapper|Eel|Grouper") ~ "Fish",
+      str_detect(species, "Crayfish|Prawn|Crab|Lobster|Yabby|Marron") ~ "Crustacean",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  ungroup() %>%
+  select(site_id, description, geometry, species, group)
+```
+
+
+# ==== Apply to TAS ====
+```{r}
+TAS_land_sites <- TAS_land_sites %>%
+  mutate(
+    description = tolower(as.character(Description)),
+    species = sapply(description, detect_species, species_patterns = species_patterns)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    group = case_when(
+      is.na(species) ~ NA_character_,
+      str_detect(species, "Oyster|Mussel|Abalone") ~ "Bivalve",
+      str_detect(species, "Bass|Barramundi|Perch|Cod|Trout|Salmon|Cobia|Tuna|Kingfish|Snapper|Eel|Grouper") ~ "Fish",
+      str_detect(species, "Crayfish|Prawn|Crab|Lobster|Yabby|Marron") ~ "Crustacean",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  ungroup() %>%
+  select(site_id, description, geometry, species, group)
+```
+
+# ==== Apply to QLD ====
+```{r}
+# ==== Apply to QLD ====
+QLD_land_sites <- QLD_land_sites %>%
+  mutate(
+    description = tolower(as.character(Species)),
+    species = sapply(description, detect_species, species_patterns = species_patterns)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    group = case_when(
+      is.na(species) ~ NA_character_,
+      str_detect(species, "Oyster|Mussel|Abalone") ~ "Bivalve",
+      str_detect(species, "Bass|Barramundi|Perch|Cod|Trout|Salmon|Cobia|Tuna|Kingfish|Snapper|Eel|Grouper") ~ "Fish",
+      str_detect(species, "Crayfish|Prawn|Crab|Lobster|Yabby|Marron") ~ "Crustacean",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  ungroup() %>%
+  select(site_id, origin, geometry, species, group)
+```
+
+
+
+#apply to NT
+#make species become other name and then apply it
+#and select only what is to be kept columns
+#dplyr::select(site_id, description, geometry, species, group)
+```{r}
+NT_land_sites <- NT_land_sites %>%
+  # Remove unwanted columns first
+  select(-c(Farm.10, Farm.11, Farm.12, Farm.2, Farm.4, Farm.6, Farm.7, 
+            Farm.number, Hatchery.1, Hatchery.2)) %>%
+  # Clean up the species column
+  mutate(
+    species_clean = tolower(as.character(Species)),
+    # Apply species detection if you have the detect_species function
+    # Otherwise use the Species column directly
+    species = sapply(species_clean, detect_species, species_patterns = species_patterns)
+  ) %>%
+  rowwise() %>%
+  mutate(
+    group = case_when(
+      is.na(species) ~ NA_character_,
+      str_detect(species, "Oyster|Mussel|Abalone") ~ "Bivalve",
+      str_detect(species, "Bass|Barramundi|Perch|Cod|Trout|Salmon|Cobia|Tuna|Kingfish|Snapper|Eel|Grouper") ~ "Fish",
+      str_detect(species, "Crayfish|Prawn|Crab|Lobster|Yabby|Marron") ~ "Crustacean",
+      TRUE ~ "Other"
+    )
+  ) %>%
+  ungroup() %>%
+  # Select final columns - adjust site_id to whatever ID column NT has (looks like Farm.ID)
+  select(site_id = Farm.ID, geometry, species, group)
+```
+ 
+
+# Check results
+```{r}
+
+table(NSW_land_sites$species, useNA = "ifany")
+ 
+test_desc <- c(
+  "Trout and Prawn farm",
+  "Barramundi hatchery",
+  "Mud crab and bay lobster ponds",
+  "Blue mussel and abalone facility"
+)
+
+sapply(tolower(test_desc), detect_species, species_patterns = species_patterns)
+```
+# Check results
+```{r}
+
+table(VIC_land_sites$species, useNA = "ifany")
+
+
+test_desc <- c(
+  "Trout and Prawn farm",
+  "Barramundi hatchery",
+  "Mud crab and bay lobster ponds",
+  "Blue mussel and abalone facility"
+)
+
+sapply(tolower(test_desc), detect_species, species_patterns = species_patterns)
+```
+
+#check TAS
+```{r}
+table(TAS_land_sites$species, useNA = "ifany")
+
+test_desc <- c(
+  "Trout and Prawn farm",
+  "Barramundi hatchery",
+  "Mud crab and bay lobster ponds",
+  "Blue mussel and abalone facility"
+)
+
+sapply(tolower(test_desc), detect_species, species_patterns = species_patterns)
+```
+
+
+
+```{r}
+#maintain only important columns 
+ NSW_land_sites <- NSW_land_sites %>%
+  dplyr::select(site_id, description, geometry, species, group)
+
+VIC_land_sites <- VIC_land_sites %>%
+  dplyr::select(site_id, description, geometry, species, group)
+  
+TAS_land_sites<-TAS_land_sites%>%
+ dplyr::select(site_id, description, geometry, species, group)
+```
+
+
+
+#Add species found by looking for facility names internet #DO THIS TO ADD other species
+```{r}
+library(dplyr)
+
+NSW_land_sites <- NSW_land_sites %>%
+  mutate(species = case_when(
+    site_id == "NSW_land_based1" ~ "lobster",    # Australian Bay Lobster 
+    site_id == "NSW_land_based10" ~ "Hatchery",   # piper creek
+    site_id == "NSW_land_based11" ~ "Salmon",  # Unknown facility
+    site_id == "NSW_land_based14" ~ "Barramundi",   # Tailor made fish farm
+    site_id == "NSW_land_based16" ~ "Hatchery",   # Narrandera Fisheries
+    site_id == "NSW_land_based22" ~ "Murray Cod",
+      TRUE ~ species  # Keep existing species value
+  ))
+```
+#DO THIS TO ADD other species
+```{r}
+VIC_land_sites <- VIC_land_sites %>%
+  mutate(species = case_when(
+    site_id == "VIC_land_based17" ~ "Abalone",
+    site_id == "VIC_land_based13" ~ "Barramundi", #mainstream aquaculture RAS https://www.mainstreamaquaculture.com/home/
+    site_id == "VIC_land_based14" ~ "Abalone",
+    site_id == "VIC_land_based16" ~ "Abalone", #Yumbah narrawong
+    site_id == "VIC_land_based2" ~ "aquarium", #Boolarra Fish Farms Hatchery
+    site_id == "VIC_land_based5" ~ "Multiple(caviar, salmon)",
+    site_id == "VIC_land_based8" ~ "Multiple(trout, salmon)",
+    
+    
+    
+          TRUE ~ species )) # Keep existing species value
+```
+
+#add species to row 333 site _id == 90SP275218  and others Rocky point aquaculture "14RP604295" and "1RP6959, 276WD130, 53SP331336"
+```{r}
+QLD_land_sites <- QLD_land_sites %>%
+  mutate(
+    species = case_when(
+      str_detect(site_id, "90SP275218") ~ "Multiple (Hatchery, Barramundi, Mangrove Jack, Sea Mullet)",
+      str_detect(site_id, "14RP604295|1RP6959") ~ "Marine Finfish (Cobia, Groupers)",
+      TRUE ~ species
+    ),
+    group = case_when(
+      str_detect(site_id, "90SP275218|14RP604295|1RP6959") ~ "Fish",
+      TRUE ~ group
+    )
+  )
+```
+
+#to see all the dataset QLD and be sure we are naming the species correctly based on information we learnt from custodians and internet websites such as Rockypoint aquaculture being finfish and not a hatchery (DAFF and website https://www.rockypointaquaculture.com.au/ )
+```{r}
+
+library(dplyr)
+tmap_mode("view")
+
+tm_shape(QLD_land_sites) +
+  tm_polygons(col = "blue", alpha = 0.5) +
+  tm_shape(AUS_states[AUS_states$STE_CODE21 == "5", ]) +
+  tm_polygons(col = "grey", alpha = 0.3)
+       
+```
+
+#add species to WA marine areas
+```{r}
+library(dplyr)
+
+WA_leases <- WA_leases %>%
+  mutate(species = case_when(
+    str_detect(tolower(location), "cone bay") ~ "barramundi",
+    TRUE ~ NA_character_  # Use NA for everything else
+  ))
+```
+#add species to WA land based areas 
+```{r}
+
+WA_land_sites <- WA_land_sites %>%
+   mutate(
+    species = case_when(
+      str_detect(location, regex("lake argyle", ignore_case = TRUE)) ~ "Barramundi",
+      str_detect(location, regex("albany|bremer", ignore_case = TRUE)) ~ "Abalone",
+      str_detect(location, regex("hutt lagoon", ignore_case = TRUE)) ~ "Microalgae",
+      TRUE ~ NA_character_
+    ),
+    group = case_when(
+      species == "Barramundi" ~ "Fish",
+      species == "Abalone" ~ "Bivalve",
+      species == "Microalgae" ~ "Other",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  select(aqua_id, geometry, species, group)
+
+```
+
+```{r}
+# Check results
+
+table(NSW_land_sites$species, useNA = "ifany")
+table(VIC_land_sites$species, useNA = "ifany")
+table(TAS_land_sites$species, useNA= "ifany")
+table(QLD_land_sites$species, useNA= "ifany")
+```
+
+#match polygons and points in NT
+```{r}
+# Separate points and polygons
+NT_points <- NT_land_sites %>%
+  filter(st_geometry_type(geometry) == "POINT")
+
+NT_polygons <- NT_land_sites %>%
+  filter(st_geometry_type(geometry) == "POLYGON")
+
+# Find which points fall within which polygons using spatial join
+points_in_polygons <- st_join(NT_points, NT_polygons, 
+                               join = st_within, 
+                               suffix = c("_point", "_poly"))
+
+# Check what we got
+print(names(points_in_polygons))
+
+# Combine the information - prioritize point data
+NT_land_sites <- NT_polygons %>%
+  left_join(
+    points_in_polygons %>% 
+      st_drop_geometry() %>%
+      select(site_id_poly, species_point = species_point, group_point = group_point),
+    by = c("site_id" = "site_id_poly")
+  ) %>%
+  mutate(
+    # Use point species/group (since polygons don't have these columns)
+    species = species_point,
+    group = group_point
+  ) %>%
+  select(site_id, geometry, species, group)
+
+# Drop Z/M dimensions and save as shapefile
+NT_land_sites_2D <- st_zm(NT_land_sites, drop = TRUE, what = "ZM")
+
+st_write(NT_land_sites_2D, 
+         here("raw_data", "copy_aquaculture_leases", "Australian_Aqua_leases", "NT_land_sites.shp"), 
+         delete_dsn = TRUE)
+
+st_write(NT_land_sites_2D,
+         here("output_data", "Australian_Aqua_sites", "NT_land_sites.shp"), 
+         delete_dsn = TRUE)
+```
+
+
+
+#save the shapefiles
+```{r}
+library(here)
+library(sf)
+
+
+# Convert to 2D and save NSW
+NSW_land_sites_2D <- st_zm(NSW_land_sites, drop = TRUE, what = "ZM")
+st_write(NSW_land_sites_2D, 
+         here("raw_data", "copy_aquaculture_leases", "Australian_Aqua_leases", "NSW_land_sites.shp"), 
+         delete_dsn = TRUE)
+
+# Convert to 2D and save VIC
+VIC_land_sites_2D <- st_zm(VIC_land_sites, drop = TRUE, what = "ZM")
+st_write(VIC_land_sites_2D, 
+         here("raw_data", "copy_aquaculture_leases", "Australian_Aqua_leases", "VIC_land_sites.shp"), 
+         delete_dsn = TRUE)
+
+TAS_land_sites_2D<- st_zm(TAS_land_sites, drop = TRUE, what = "ZM")
+st_write(TAS_land_sites_2D, 
+         here("raw_data", "copy_aquaculture_leases", "Australian_Aqua_leases", "TAS_land_sites.shp"), 
+         delete_dsn = TRUE)
+
+QLD_land_sites_2D<- st_zm(QLD_land_sites, drop = TRUE, what = "ZM")
+st_write(QLD_land_sites_2D, 
+         here("raw_data", "copy_aquaculture_leases", "Australian_Aqua_leases", "QLD_land_sites.shp"), 
+         delete_dsn = TRUE)
+st_write(QLD_land_sites_2D, 
+         here("output_data", "Australian_Aqua_sites", "QLD_land_sites.shp"), 
+         delete_dsn = TRUE)
+
+SA_land_sites_2D<- st_zm(SA_land_sites, drop = TRUE, what = "ZM")
+st_write(SA_land_sites_2D, 
+         here("raw_data", "copy_aquaculture_leases", "Australian_Aqua_leases", "SA_land_sites.shp"), 
+         delete_dsn = TRUE)
+
+WA_land_sites_2D<- st_zm(WA_land_sites, drop = TRUE, what = "ZM")
+st_write(WA_land_sites_2D, 
+         here("raw_data", "copy_aquaculture_leases", "Australian_Aqua_leases", "WA_land_sites.shp"), 
+         delete_dsn = TRUE)
+st_write(WA_land_sites_2D, 
+         here("output_data", "Australian_Aqua_sites", "WA_land_sites.shp"), 
+         delete_dsn = TRUE)
+
+
+```
+
+#save as geojson
+```{r}
+# Save NSW data as GeoJSON
+st_write(NSW_land_sites, 
+         here("raw_data", "NSW_land_sites.geojson"), 
+         delete_dsn = TRUE)
+
+# Save VIC data as GeoJSON
+st_write(VIC_land_sites, 
+         here("raw_data", "VIC_land_sites.geojson"), 
+         delete_dsn = TRUE)
+
+st_write(TAS_land_sites, 
+         here("raw_data", "TAS_land_sites.geojson"), 
+         delete_dsn = TRUE)
+```
+```{r}
+#qtm(australia_land)
+qtm(WA_land_sites)+
+  qtm(australia_land)
+```
+
+
+#Upload South Australian SA details and species
+
+```{r}
+SA_land_sites<-st_read(here("output_data/Australian_Aqua_sites/SA_land_sites.shp"))%>%
+st_transform("EPSG:3577")%>%
+st_make_valid()
+
+#View(SA_land_sites)
+```
+
+#SA land-based species datasets adding species based n information received from Custodians 
+```{r}
+library(dplyr)
+library(stringr)
+library(purrr)
+library(sf)
+library(here)
+
+# === Species dictionary ===
+species_groups <- list(
+  Bivalves = c(
+    "\\bgiant\\s*oyster\\b" = "Giant Oyster",
+    "\\brock\\s*oyster\\b" = "Rock Oyster",
+    "\\bsunshine\\s*oyster\\b" = "Sunshine Oyster (QSO)",
+    "\\bblue\\s*mussels?\\b" = "Blue Mussel",
+    "\\bgreenlip\\s*abalone\\b" = "Greenlip Abalone",
+    "\\bblacklip\\s*abalone\\b" = "Blacklip Abalone",
+    "\\babalones?\\b" = "Abalone"
+  ),
+  Fish = c(
+    "\\baustralian\\s*bass\\b" = "Australian Bass",
+    "\\bbarramundi\\b" = "Barramundi",
+    "\\bgolden\\s*perch\\b" = "Golden Perch",
+    "\\bmary\\s*river\\s*cod\\b" = "Mary River Cod",
+    "\\bsilver\\s*perch\\b" = "Silver Perch",
+    "\\bbrook\\s*trouts?\\b" = "Brook Trout",
+    "\\brainbow\\s*trouts?\\b" = "Rainbow Trout",
+    "\\bbrown\\s*trouts?\\b" = "Brown Trout",
+    "\\bsalmons?\\b" = "Salmon",
+    "\\bcobias?\\b" = "Cobia",
+    "\\bjade\\s*perch\\b" = "Jade Perch",
+    "\\bsouthern\\s*bluefin\\s*tunas?\\b" = "Southern Bluefin Tuna",
+    "\\byellowtail\\s*kingfish\\b" = "Yellowtail Kingfish",
+    "\\bsnappers?\\b" = "Snapper",
+    "\\bshort[- ]?fin\\s*eels?\\b" = "Shortfin Eel",
+    "\\blong[- ]?fin\\s*eels?\\b" = "Longfin Eel",
+    "\\bgrouper\\b" = "Grouper",
+    "\\bmurray\\s*cod\\b" = "Murray Cod",
+    "\\bcaviars?\\b" = "Caviar"
+  ),
+  Crustacean = c(
+    "\\bred\\s*claw\\s*crayfish\\b" = "Red Claw Crayfish",
+    "\\bred\\s*claws?\\b" = "Red Claw Crayfish",
+    "\\bblack\\s*tiger\\s*prawns?\\b" = "Black Tiger Prawn",
+    "\\bkuruma\\s*prawns?\\b" = "Kuruma Prawn",
+    "\\bprawns?\\b" = "Prawn",
+    "\\bmud\\s*crabs?\\b" = "Mud Crab",
+    "\\baustralian\\s*bay\\s*lobster\\b" = "Australian Bay Lobster",
+    "\\bmoreton\\s*bay\\s*bugs?\\b" = "Australian Bay Lobster",
+    "\\blobsters?\\b" = "Lobster",
+    "\\byabb(?:y|ies)\\b" = "Yabby",
+    "\\bmarrons?\\b" = "Marron"
+  ),
+  Other = c(
+    "\\bhatchery\\b" = "Hatchery"
+  )
+)
+
+species_patterns <- purrr::flatten_chr(species_groups)
+
+# === Helper functions ===
+detect_species <- function(text_vector) {
+  combined_text <- tolower(paste(text_vector, collapse = " "))
+  detected <- names(species_patterns)[str_detect(combined_text,
+                                                  regex(names(species_patterns),
+                                                        ignore_case = TRUE))]
+  if (length(detected) > 0) {
+    species_list <- unique(species_patterns[detected])
+    if (length(species_list) > 1) {
+      return(paste0("Multiple (", paste(species_list, collapse = ", "), ")"))
+    } else {
+      return(species_list)
+    }
+  } else {
+    return(NA_character_)
+  }
+}
+
+get_species_group <- function(species_text) {
+  if (is.na(species_text)) return(NA_character_)
+  groups <- character()
+  for (group_name in names(species_groups)) {
+    if (any(str_detect(species_text, fixed(species_groups[[group_name]])))) {
+      groups <- c(groups, group_name)
+    }
+  }
+  if (length(groups) > 0) return(paste(unique(groups), collapse = "; "))
+  return(NA_character_)
+}
+
+# === Read SA land-based sites ===
+
+SA_land_sites <- st_read(here("output_data/Australian_Aqua_sites/SA_land_sites.shp")) %>%
+  rename(reg_type = reg_typ) %>%
+  st_transform("EPSG:3577") %>%
+  st_make_valid() %>%
+  # Remove any species columns from previous runs before detection
+  select(-any_of(c("species", "group", "species_source",
+                    "spccs_s", "spcs_sr", "grp")))  # truncated names too
+
+# === Detect species from text fields ===
+SA_land_sites <- SA_land_sites %>%
+  rowwise() %>%
+  mutate(species_detected = detect_species(c_across(where(is.character)))) %>%
+  ungroup()
+
+# === Assign final species, group, and source ===
+SA_land_sites <- SA_land_sites %>%
+  mutate(
+    species = case_when(
+      !is.na(species_detected) ~ species_detected,
+      reg_type %in% c("Landbased Category A", "Appl Landbased Cat A") ~
+        "Cherax spp.",
+      reg_type %in% c("Landbased Category B", "Appl Landbased Cat B") ~
+        "Native finfish",
+      reg_type == "Landbased Category C" ~ "Hatchery",
+      reg_type == "Landbased Category D" ~ "Abalone",
+      TRUE ~ NA_character_
+    ),
+   group = case_when(
+      !is.na(species_detected) ~ sapply(species_detected, get_species_group),
+      reg_type %in% c("Landbased Category A", "Appl Landbased Cat A") ~
+        "Crustaceans",
+      reg_type %in% c("Landbased Category B", "Appl Landbased Cat B") ~
+        "Fish",
+      reg_type == "Landbased Category C" ~ "Other",
+      reg_type == "Landbased Category D" ~ "Bivalves",
+      TRUE ~ NA_character_
+    ),
+    
+    species_source = case_when(
+      !is.na(species_detected) ~ "Detected from text",
+      !is.na(species) ~ "Inferred from category",
+      TRUE ~ "Unknown"
+    )
+  ) %>%
+  select(-species_detected)
+
+# === Keep only columns needed for Code 7 + useful metadata ===
+SA_land_sites <- SA_land_sites %>%
+  select(reg_id, reg_no, reg_type, status, site_id,
+         species, group, species_source, geometry)
+
+# === Save ===
+st_write(SA_land_sites,
+         here("output_data/Australian_Aqua_sites/SA_land_sites.shp"),
+         delete_dsn = TRUE)
+
+saveRDS(SA_land_sites,
+        here("output_data/Australian_Aqua_sites/SA_land_sites.rds"))
+
+# === Quick summary ===
+cat("=== SA Species Summary ===\n")
+SA_land_sites %>%
+  st_drop_geometry() %>%
+  count(reg_type, species, group, species_source) %>%
+  arrange(reg_type) %>%
+  print()
+```
+
+#specificities of how we separated WA land-leases from marine 
+#to see all the dataset
+```{r}
+
+library(dplyr)
+tmap_mode("view")
+
+tm_shape(WA_leases) +
+  tm_polygons(col = "blue", alpha = 0.5) +
+  tm_shape(AUS_states[AUS_states$STE_CODE21 == "5", ]) +
+  tm_polygons(col = "grey", alpha = 0.3)
+         
+              
+```
+
+
+#to filter one farm and see where its located
+```{r}
+library(dplyr)
+tmap_mode("view")
+
+tm_shape(WA_leases[WA_leases$aqua_id == "1045", ]) +
+  tm_polygons(col = "blue", alpha = 0.5) +
+  tm_shape(AUS_states[AUS_states$STE_CODE21 == "5", ]) +
+  tm_polygons(col = "grey", alpha = 0.3)
+  #or            
+              
+tm_shape(WA_leases[85, ]) +
+  tm_polygons(col = "blue") +
+  tm_shape(AUS_states[AUS_states$STE_CODE21 == "5", ]) +
+  tm_polygons(col = "grey")
+```
+
+```{r}
+library(sf)
+library(dplyr)
+
+# Label which ones you verified as truly land-based
+truly_land_based <- c(2, 3, 6, 8, 9, 10, 11, 12, 16, 17)
+
+# Pre-calculate coast line once
+coast_line <- st_cast(st_boundary(australia_land), "MULTILINESTRING")
+
+# Calculate metrics for each site
+WA_land_sites_analysis <- WA_land_sites %>%
+  mutate(
+    site_number = row_number(),
+    is_truly_land = site_number %in% truly_land_based,
+    
+    # Calculate centroid
+    centroid = st_centroid(geometry),
+    
+    # Percentage of site overlapping land
+    site_area = st_area(geometry),
+    overlap_area = st_area(st_intersection(geometry, australia_land)),
+    pct_on_land = as.numeric(overlap_area / site_area) * 100
+  )
+
+# Calculate distance to coast separately (this is slower but works)
+WA_land_sites_analysis <- WA_land_sites_analysis %>%
+  rowwise() %>%
+  mutate(
+    dist_to_coast = as.numeric(st_distance(centroid, coast_line))
+  ) %>%
+  ungroup()
+
+# Now visualize
+library(ggplot2)
+
+# Plot distance to coast
+ggplot(WA_land_sites_analysis, aes(x = is_truly_land, y = dist_to_coast)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.1, size = 3) +
+  labs(title = "Distance to Coast", x = "Truly Land-Based?", y = "Distance (m)")
+
+# Plot percentage on land
+ggplot(WA_land_sites_analysis, aes(x = is_truly_land, y = pct_on_land)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.1, size = 3) +
+  labs(title = "% of Site on Land", x = "Truly Land-Based?", y = "% on Land")
+
+# Summary statistics
+WA_land_sites_analysis %>%
+  st_drop_geometry() %>%
+  group_by(is_truly_land) %>%
+  summarise(
+    n = n(),
+    mean_dist_coast = mean(dist_to_coast, na.rm = TRUE),
+    median_dist_coast = median(dist_to_coast, na.rm = TRUE),
+    mean_pct_land = mean(pct_on_land, na.rm = TRUE),
+    median_pct_land = median(pct_on_land, na.rm = TRUE),
+    min_pct_land = min(pct_on_land, na.rm = TRUE),
+    max_pct_land = max(pct_on_land, na.rm = TRUE)
+  )
+```
+```{r}
+WA_land_sites_analysis %>%
+  st_drop_geometry() %>%
+  select(site_number, is_truly_land, dist_to_coast, pct_on_land) %>%
+  arrange(is_truly_land, dist_to_coast) %>%
+  print(n = 20)
+
+```
+```{r}
+library(terra)
+
+# Extract elevation at each site centroid
+WA_land_sites_analysis <- WA_land_sites_analysis %>%
+  mutate(
+    elev_at_centroid = terra::extract(aus_dem, vect(centroid))[[2]]
+  )
+
+# Check elevation patterns
+WA_land_sites_analysis %>%
+  st_drop_geometry() %>%
+  group_by(is_truly_land) %>%
+  summarise(
+    n = n(),
+    mean_elev = mean(elev_at_centroid, na.rm = TRUE),
+    median_elev = median(elev_at_centroid, na.rm = TRUE),
+    min_elev = min(elev_at_centroid, na.rm = TRUE),
+    max_elev = max(elev_at_centroid, na.rm = TRUE)
+  )
+
+# Plot
+ggplot(WA_land_sites_analysis, aes(x = is_truly_land, y = elev_at_centroid)) +
+  geom_boxplot() +
+  geom_jitter(width = 0.1, size = 3) +
+  labs(title = "Elevation at Site", x = "Truly Land-Based?", y = "Elevation (m)")
+```
+
+```{r}
+# Slightly more permissive thresholds
+WA_land_sites_final <- WA_land_sites %>%
+  mutate(
+    centroid = st_centroid(geometry),
+    site_area = st_area(geometry),
+    overlap_area = st_area(st_intersection(geometry, australia_land)),
+    pct_on_land = as.numeric(overlap_area / site_area) * 100,
+    elev_at_centroid = terra::extract(aus_dem, vect(centroid))[[2]]
+  ) %>%
+  rowwise() %>%
+  mutate(
+    dist_to_coast = as.numeric(st_distance(centroid, coast_line))
+  ) %>%
+  ungroup() %>%
+  filter(
+    elev_at_centroid > 2 &    # Above 2m elevation (more permissive)
+    pct_on_land > 70           # At least 70% on land
+  ) %>%
+  mutate(site_id = paste0("WA_land_based_", row_number()))
+
+# How many now?
+nrow(WA_land_sites_final)
+
+# Check if we got all 10
+table(WA_land_sites_final$site_number %in% truly_land_based)
+```
+```{r}
+# Which verified sites did we capture?
+truly_land_based <- c(2, 3, 6, 8, 9, 10, 11, 12, 16, 17)
+
+# Check which ones passed the filter
+WA_land_sites_analysis %>%
+  st_drop_geometry() %>%
+  filter(is_truly_land == TRUE) %>%
+  select(site_number, elev_at_centroid, pct_on_land, dist_to_coast) %>%
+  mutate(
+    passes_filter = elev_at_centroid > 5 & pct_on_land > 75
+  ) %>%
+  arrange(site_number)
+```
+```{r}
+# Add site_number BEFORE filtering so we can track it
+WA_land_sites_final <- WA_land_sites %>%
+  mutate(
+    site_number = row_number(),  # Add this first!
+    centroid = st_centroid(geometry),
+    site_area = st_area(geometry),
+    overlap_area = st_area(st_intersection(geometry, australia_land)),
+    pct_on_land = as.numeric(overlap_area / site_area) * 100,
+    elev_at_centroid = terra::extract(aus_dem, vect(centroid))[[2]]
+  ) %>%
+  rowwise() %>%
+  mutate(
+    dist_to_coast = as.numeric(st_distance(centroid, coast_line))
+  ) %>%
+  ungroup() %>%
+  filter(
+    elev_at_centroid > 2 &    
+    pct_on_land > 70           
+  ) %>%
+  mutate(
+    is_verified = site_number %in% truly_land_based,
+    site_id = paste0("WA_land_based_", row_number())
+  )
+
+# How many verified vs false positives?
+table(WA_land_sites_final$is_verified)
+
+# Which verified sites did we get?
+WA_land_sites_final %>%
+  st_drop_geometry() %>%
+  filter(is_verified) %>%
+  select(site_number, elev_at_centroid, pct_on_land, dist_to_coast) %>%
+  arrange(site_number)
+
+# Which verified sites are we MISSING?
+missing_sites <- setdiff(truly_land_based, WA_land_sites_final$site_number)
+cat("Missing verified sites:", missing_sites, "\n")
+
+# What false positives did we get?
+WA_land_sites_final %>%
+  st_drop_geometry() %>%
+  filter(!is_verified) %>%
+  select(site_number, elev_at_centroid, pct_on_land, dist_to_coast)
+```
+```{r}
+# Most balanced filter - captures all true positives, minimal false positives
+WA_land_sites_final <- WA_land_sites %>%
+  mutate(
+    site_number = row_number(),
+    centroid = st_centroid(geometry),
+    site_area = st_area(geometry),
+    overlap_area = st_area(st_intersection(geometry, australia_land)),
+    pct_on_land = as.numeric(overlap_area / site_area) * 100,
+    elev_at_centroid = terra::extract(aus_dem, vect(centroid))[[2]]
+  ) %>%
+  ungroup() %>%
+  filter(
+    elev_at_centroid > 2 &    # Excludes intertidal zones
+    pct_on_land > 70           # Mostly on land
+  ) %>%
+  mutate(site_id = paste0("WA_land_based_", row_number()))
+
+# Document the trade-off in your methods section:
+# "Sites were classified as land-based if centroid elevation >2m and 
+#  >70% of site area intersected terrestrial areas. This approach 
+#  captured all known land-based sites (n=10) with 5 potential false 
+#  positives due to DEM resolution limitations near estuaries (67% precision)."
+
+# Save
+st_write(WA_land_sites_final, 
+         here("output_data", "WA_land_sites_final.gpkg"), 
+         delete_dsn = TRUE)
+```
+
+```{r}
+qtm(WA_land_sites_final)
+```
+
