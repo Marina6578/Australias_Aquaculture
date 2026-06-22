@@ -1,5 +1,5 @@
 ---
-title: "8_mapping"
+title: "08_mapping active and icative aquaculture/presence of infrastructure"
 Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
 #https://www.sustainableseasgroup.com/
 #These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
