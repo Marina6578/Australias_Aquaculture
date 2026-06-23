@@ -48,10 +48,13 @@ We downloaded the lease data to start our analysis. If you want to rerun it, you
 
 | State | Custodian / Source | Link |
 |-------|--------------------|------|
-| QLD | Department of Agriculture, Fisheries and Forestry (DAFF) | List of vector points provided directly — no public link |
+| QLD | Department of Agriculture, Fisheries and Forestry (DAFF) | List of vector points provided directly — no public link -if you need this data please get in touch with DAFF |
 | NSW | Department of Primary Industries and Regional Development (DPIRD) | [Fisheries Data Portal](https://webmap.industry.nsw.gov.au/Html5Viewer/index.html?viewer=Fisheries_Data_Portal) · *Production Data Comparison* (Dept. of Primary Industries) |
 | VIC | Coastkit | [Coastkit map viewer](https://mapshare.vic.gov.au/coastkit/) · *VFA Commercial Fish Production Information Bulletin 2024* (PDF) |
 | TAS | The List | [Geo-metadata record](https://www.thelist.tas.gov.au/app/content/data/geo-meta-data-record?detailRecordUID=10db46db-698d-43e6-a1a7-e1bfff13aedc) |
 | SA | data.sa / PIRSA / DPIRD | [Aquaculture leases and licences](https://data.sa.gov.au/data/dataset/aquaculture-leases-and-licences) |
 | WA | DPIRD | [Aquaculture sites dataset](https://catalogue.data.wa.gov.au/dataset/aquaculture-sites-dpird-0) |
-| NT | Department of Industry, Tourism and Trade (NT Government) | PDF with point locations provided; polygons digitised in-house (only pearls present for mariculture) |
+| NT | Department of Industry, Tourism and Trade (NT Government) | PDF with point locations provided; polygons digitised in-house (only pearls present for mariculture) if you need this data please get in touch with Dep.ITT/NT |
+
+
+We also used Google Earth Engine(GEE) to find the Aquaculture Infrastructure between steps 2 and 3 of the pipeline. The GEE codes will be shared here with a mention and therefore are in JavaScript and should be used in that environment. 
