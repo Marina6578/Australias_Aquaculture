@@ -1,0 +1,604 @@
+//The Authors of these scripts are: Simon Metcher and Marina Christofidis (simon.metcher@griffithuni.edu.au and marina.christofidis@gmail.com)
+//https://www.sustainableseasgroup.com/
+//These Scripts are relative to Version 1 of Australia's Aquaculture Mapping 
+//GitHub: Marina6578/Australias_Aquaculture
+
+//Longlines
+
+//PREPARE AND EXPORT THE MASTER TRAINING DATASET
+
+var CONFIG = {
+  DATE_RANGE: {start: '2021-07-01', end: '2022-06-30'},
+  AQUA_POLYS: 'projects/aquaculturemapping/assets/satellite_embedding/longline_pos_STATE',
+  WATER_POLYS: 'projects/aquaculturemapping/assets/satellite_embedding/longline_neg_STATE',
+  TRAINING_ASSET_OUT: 'projects/aquaculturemapping/assets/satellite_embedding/longline_train_STATE',
+  BUF_OUT: 20, SAMPLES_POS: 8000, SAMPLES_RING_NEG: 4000, SAMPLES_FAR_NEG: 2000,
+};
+
+var aquaculture = ee.FeatureCollection(CONFIG.AQUA_POLYS);
+var water = ee.FeatureCollection(CONFIG.WATER_POLYS);
+var trainingAoiGeom = aquaculture.merge(water).geometry().bounds();
+Map.centerObject(trainingAoiGeom, 12);
+print('--- Preparing Image Stack for Training Area ---');
+
+var embeddingsImage = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL').filterDate(CONFIG.DATE_RANGE.start, CONFIG.DATE_RANGE.end).filterBounds(trainingAoiGeom).mosaic().clip(trainingAoiGeom).toFloat();
+var sarComposite = ee.ImageCollection('COPERNICUS/S1_GRD').filterDate(CONFIG.DATE_RANGE.start, CONFIG.DATE_RANGE.end).filterBounds(trainingAoiGeom).filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')).filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH')).filter(ee.Filter.eq('instrumentMode', 'IW')).select(['VV', 'VH']).median().toFloat();
+var imageInt = sarComposite.select('VV').multiply(100).add(4000).toInt16();
+var glcm = imageInt.glcmTexture({size: 4});
+var vv_mean_smoothed = sarComposite.select('VV').reduceNeighborhood({reducer: ee.Reducer.mean(), kernel: ee.Kernel.square({radius: 50, units: 'meters'})}).rename('VV_mean_smoothed');
+var vv_sharpened = sarComposite.select('VV').convolve(ee.Kernel.laplacian8()).rename('VV_sharpened');
+var sarFeatures = sarComposite.addBands(glcm).addBands(vv_mean_smoothed).addBands(vv_sharpened).select(['VV', 'VH', 'VV_contrast', 'VV_corr', 'VV_ent', 'VV_diss', 'VV_var', 'VV_mean_smoothed', 'VV_sharpened']);
+var combinedFeaturesImage = embeddingsImage.addBands(sarFeatures);
+
+print('--- Preparing Training Samples ---');
+var corePos = aquaculture;
+var outerRing = aquaculture.map(function(f) { return f.buffer(CONFIG.BUF_OUT).difference(f); });
+var posMask = ee.Image().paint(corePos, 1).selfMask();
+var ringNegMask = ee.Image().paint(outerRing, 1).selfMask();
+var farNegMask = ee.Image().paint(water, 1).selfMask();
+var posSamples = combinedFeaturesImage.addBands(ee.Image(1).rename('label')).updateMask(posMask).stratifiedSample({numPoints: CONFIG.SAMPLES_POS, classBand: 'label', region: trainingAoiGeom, scale: 10, geometries: true});
+var ringNegSamples = combinedFeaturesImage.addBands(ee.Image(0).rename('label')).updateMask(ringNegMask).stratifiedSample({numPoints: CONFIG.SAMPLES_RING_NEG, classBand: 'label', region: trainingAoiGeom, scale: 10, geometries: true});
+var farNegSamples = combinedFeaturesImage.addBands(ee.Image(0).rename('label')).updateMask(farNegMask).stratifiedSample({numPoints: CONFIG.SAMPLES_FAR_NEG, classBand: 'label', region: trainingAoiGeom, scale: 10, geometries: true});
+var training = posSamples.merge(ringNegSamples).merge(farNegSamples);
+print('Total training samples:', training.size());
+
+Map.addLayer(posMask, {palette: 'green'}, 'Positive Samples Zone', false);
+Map.addLayer(ringNegMask, {palette: 'yellow'}, 'Ring Negative Samples Zone', false);
+Export.table.toAsset({
+  collection: training,
+  description: 'Export_Unified_Training_Samples',
+  assetId: CONFIG.TRAINING_ASSET_OUT
+});
+
+//DIRECT CLASSIFICATION SCRIPT 
+
+var CONFIG = {
+LARGE_AOI_ASSET: 'projects/aquaculturemapping/assets/satellite_embedding/STATE_Lease_AOI',
+ LEASE_ASSET: 'projects/aquaculturemapping/assets/STATE_Leases',
+
+  TRAINING_ASSET: 'projects/aquaculturemapping/assets/satellite_embedding/longline_train_STATE',
+  
+  DATE_RANGE: {start: '2021', end: '2022'},
+  RF_TREES: 150,  
+  SEED: 7,
+  TRAIN_VALIDATE_SPLIT: 0.8 // 80% for training, 20% for validation
+};
+
+//PREPARE AND TRAIN THE MODEL 
+
+print('--- STEP 1: Preparing and Training Classifier ---');
+var training = ee.FeatureCollection(CONFIG.TRAINING_ASSET);
+
+training = training.randomColumn('random', CONFIG.SEED);
+var trainingSet = training.filter(ee.Filter.lt('random', CONFIG.TRAIN_VALIDATE_SPLIT));
+var validationSet = training.filter(ee.Filter.gte('random', CONFIG.TRAIN_VALIDATE_SPLIT));
+print('Total Samples:', training.size());
+print('Training Samples:', trainingSet.size());
+print('Validation Samples:', validationSet.size());
+
+var allBands = trainingSet.first().propertyNames().remove('label').remove('system:index').remove('random');
+var classifier = ee.Classifier.smileRandomForest({
+  numberOfTrees: CONFIG.RF_TREES,
+  seed: CONFIG.SEED
+}).train({
+  features: trainingSet, // <-- Use trainingSet
+  classProperty: 'label',
+  inputProperties: allBands
+});
+
+//VALIDATE THE MODEL
+
+print('--- STEP 1b: Validating Classifier ---');
+
+var validated = validationSet.classify(classifier);
+var confusionMatrix = validated.errorMatrix('label', 'classification');
+var overallAccuracy = confusionMatrix.accuracy();
+var producersAccuracy = confusionMatrix.producersAccuracy(); // Recall, shape [2, 1]
+var consumersAccuracy = confusionMatrix.consumersAccuracy(); // Precision, shape [1, 2]
+var precision = consumersAccuracy.transpose(); // <-- KEY FIX, now shape [2, 1]
+var f1Score = producersAccuracy.multiply(precision).multiply(2)
+              .divide(producersAccuracy.add(precision));
+
+print('Validation Confusion Matrix:', confusionMatrix);
+print('Validation Overall Accuracy:', overallAccuracy);
+print('Validation Producers Accuracy (Recall):', producersAccuracy);
+print('Validation Consumers Accuracy (Precision):', consumersAccuracy);
+print('Validation F1-Score (per class):', f1Score); // <-- Corrected
+
+//PREPARE IMAGE STACK FOR LEASE AREAS 
+
+print('--- STEP 2: Preparing image stack for LEASE AREAS ---');
+
+var aoi = ee.FeatureCollection(CONFIG.LARGE_AOI_ASSET);
+var broadGeometry = aoi.geometry(); // Broad area for filtering
+var leaseBoundaries = ee.FeatureCollection(CONFIG.LEASE_ASSET);
+var leaseGeometry = leaseBoundaries.geometry(); // Precise area for clipping
+
+Map.centerObject(leaseGeometry, 9);
+Map.addLayer(aoi, {color: 'FF0000', fillColor: '00000000'}, 'Broad Area of Interest', false);
+Map.addLayer(leaseBoundaries, {color: 'cyan'}, 'Lease Boundaries');
+
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0).and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  return image.updateMask(mask).divide(10000);
+}
+var s2Composite = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+    .filterDate(CONFIG.DATE_RANGE.start, CONFIG.DATE_RANGE.end)
+    .filterBounds(broadGeometry)
+    .map(maskS2clouds)
+    .median()
+    .select(['B4', 'B3', 'B2']);
+var sarComposite = ee.ImageCollection('COPERNICUS/S1_GRD')
+    .filterDate(CONFIG.DATE_RANGE.start, CONFIG.DATE_RANGE.end).filterBounds(broadGeometry)
+    .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV')).filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+    .filter(ee.Filter.eq('instrumentMode', 'IW')).select(['VV', 'VH']).median().toFloat();
+    
+var embeddingsImage = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
+    .filterDate(CONFIG.DATE_RANGE.start, CONFIG.DATE_RANGE.end).filterBounds(broadGeometry).mosaic().toFloat();
+var imageInt = sarComposite.select('VV').multiply(100).add(4000).toInt16();
+var glcm = imageInt.glcmTexture({size: 4});
+var vv_mean_smoothed = sarComposite.select('VV').reduceNeighborhood({reducer: ee.Reducer.mean(), kernel: ee.Kernel.square({radius: 50, units: 'meters'})}).rename('VV_mean_smoothed');
+var vv_sharpened = sarComposite.select('VV').convolve(ee.Kernel.laplacian8()).rename('VV_sharpened');
+var sarFeatures = sarComposite.addBands(glcm).addBands(vv_mean_smoothed).addBands(vv_sharpened)
+    .select(['VV', 'VH', 'VV_contrast', 'VV_corr', 'VV_ent', 'VV_diss', 'VV_var', 'VV_mean_smoothed', 'VV_sharpened']);
+var combinedFeaturesImage = embeddingsImage.addBands(sarFeatures)
+    .clip(leaseGeometry); // <-- Clipped to leases
+
+//CLASSIFY AREAS AND VISUALIZE
+
+print('--- STEP 3: Classifying lease areas and adding to map ---');
+
+var finalClassification = combinedFeaturesImage.classify(classifier);
+
+Map.addLayer(finalClassification.selfMask(), {palette: ['#00FF00']}, 'Final Classification (Leases Only)');
+Map.addLayer(sarComposite, {min: -25, max: 0, bands: ['VV']}, 'SAR Composite', false);
+
+var s2VisParams = {min: 0.0, max: 0.3, bands: ['B4', 'B3', 'B2']};
+Map.addLayer(s2Composite, s2VisParams, 'Sentinel-2 Optical (RGB)', false);
+
+
+//EXPORT THE CLASSIFICATION RASTER 
+
+print('--- STEP 4: Preparing export task ---');
+Export.image.toDrive({
+  image: finalClassification.toByte(), 
+  description: 'Lease_Area_Classification',
+  folder: 'GEE_Large_Area_Exports',
+  fileNamePrefix: 'TAS_Longlines',
+  region: leaseGeometry, // <-- Export region is the lease boundaries
+  scale: 10,
+  maxPixels: 1e12
+});
+print('Export task created. Please go to the "Tasks" tab to run it.');
+
+//Cages
+
+//PREPARE AND EXPORT THE MASTER TRAINING DATASET
+
+var CONFIG = {
+  DATE_RANGE: {start: '2021', end: '2022'},
+  AQUA_POLYS: 'projects/aquaculturemapping/assets/satellite_embedding/cage_STATE_pos',
+  WATER_POLYS: 'projects/aquaculturemapping/assets/satellite_embedding/cage_STATE_neg',
+  TRAINING_ASSET_OUT: 'projects/aquaculturemapping/assets/satellite_embedding/cage_STATE_train', 
+  BUF_OUT: 20, SAMPLES_POS: 8000, SAMPLES_RING_NEG: 4000, SAMPLES_FAR_NEG: 2000,
+};
+
+var aquaculture = ee.FeatureCollection(CONFIG.AQUA_POLYS);
+var water = ee.FeatureCollection(CONFIG.WATER_POLYS);
+var trainingAoiGeom = aquaculture.merge(water).geometry().bounds();
+Map.centerObject(trainingAoiGeom, 12);
+print('--- Preparing Image Stack for Training Area (Embeddings-Only) ---');
+
+var embeddingsImage = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
+    .filterDate(CONFIG.DATE_RANGE.start, CONFIG.DATE_RANGE.end)
+    .filterBounds(trainingAoiGeom)
+    .mosaic()
+    .clip(trainingAoiGeom)
+    .toFloat();
+
+var combinedFeaturesImage = embeddingsImage;
+
+print('--- Preparing Training Samples ---');
+var corePos = aquaculture;
+var outerRing = aquaculture.map(function(f) { return f.buffer(CONFIG.BUF_OUT).difference(f); });
+var posMask = ee.Image().paint(corePos, 1).selfMask();
+var ringNegMask = ee.Image().paint(outerRing, 1).selfMask();
+var farNegMask = ee.Image().paint(water, 1).selfMask();
+
+var posSamples = combinedFeaturesImage.addBands(ee.Image(1).rename('label'))
+    .updateMask(posMask)
+    .stratifiedSample({
+      numPoints: CONFIG.SAMPLES_POS, 
+      classBand: 'label', 
+      region: trainingAoiGeom, 
+      scale: 10, 
+      geometries: true
+    });
+    
+var ringNegSamples = combinedFeaturesImage.addBands(ee.Image(0).rename('label'))
+    .updateMask(ringNegMask)
+    .stratifiedSample({
+      numPoints: CONFIG.SAMPLES_RING_NEG, 
+      classBand: 'label', 
+      region: trainingAoiGeom, 
+      scale: 10, 
+      geometries: true
+    });
+    
+var farNegSamples = combinedFeaturesImage.addBands(ee.Image(0).rename('label'))
+    .updateMask(farNegMask)
+    .stratifiedSample({
+      numPoints: CONFIG.SAMPLES_FAR_NEG, 
+      classBand: 'label', 
+      region: trainingAoiGeom, 
+      scale: 10, 
+      geometries: true
+    });
+    
+var training = posSamples.merge(ringNegSamples).merge(farNegSamples);
+print('Total training samples:', training.size());
+
+Map.addLayer(posMask, {palette: 'green'}, 'Positive Samples Zone', false);
+Map.addLayer(ringNegMask, {palette: 'yellow'}, 'Ring Negative Samples Zone', false);
+
+Export.table.toAsset({
+  collection: training,
+  description: 'Export_Unified_WA_Cage_Training_Samples', // Suggestion: Modify description
+  assetId: CONFIG.TRAINING_ASSET_OUT
+});
+
+//DIRECT CLASSIFICATION SCRIPT 
+
+var CONFIG = {
+ LARGE_AOI_ASSET: 'projects/aquaculturemapping/assets/satellite_embedding/TAS_Lease_AOI',
+  LEASE_ASSET: 'projects/aquaculturemapping/assets/TAS_Leases',
+  TRAINING_ASSET: 'projects/aquaculturemapping/assets/satellite_embedding/cage_tas_train',
+  
+  DATE_RANGE: {start: '2021', end: '2022'},
+  RF_TREES: 150, 
+  SEED: 7,
+
+  TRAIN_VALIDATE_SPLIT: 0.8 // 80% for training, 20% for validation
+};
+
+
+print('--- STEP 1: Preparing and Training Classifier ---');
+
+var training = ee.FeatureCollection(CONFIG.TRAINING_ASSET);
+training = training.randomColumn('random', CONFIG.SEED);
+var trainingSet = training.filter(ee.Filter.lt('random', CONFIG.TRAIN_VALIDATE_SPLIT));
+var validationSet = training.filter(ee.Filter.gte('random', CONFIG.TRAIN_VALIDATE_SPLIT));
+
+print('Total Samples:', training.size());
+print('Training Samples:', trainingSet.size());
+print('Validation Samples:', validationSet.size());
+
+var allBands = trainingSet.first().propertyNames().remove('label').remove('system:index').remove('random');
+
+var classifier = ee.Classifier.smileRandomForest({
+  numberOfTrees: CONFIG.RF_TREES,
+  seed: CONFIG.SEED
+}).train({
+  features: trainingSet, // <-- Use only the training split
+  classProperty: 'label',
+  inputProperties: allBands
+});
+
+
+//VALIDATE THE MODEL
+
+print('--- STEP 1b: Validating Classifier ---');
+
+var validated = validationSet.classify(classifier);
+var confusionMatrix = validated.errorMatrix('label', 'classification');
+var overallAccuracy = confusionMatrix.accuracy();
+var producersAccuracy = confusionMatrix.producersAccuracy(); // Recall, shape [2, 1]
+var consumersAccuracy = confusionMatrix.consumersAccuracy(); // Precision, shape [1, 2]
+var precision = consumersAccuracy.transpose(); // <-- shape [2, 1]
+var f1Score = producersAccuracy.multiply(precision).multiply(2)
+              .divide(producersAccuracy.add(precision));
+
+print('Validation Confusion Matrix:', confusionMatrix);
+print('Validation Overall Accuracy:', overallAccuracy);
+print('Validation Producers Accuracy (Recall):', producersAccuracy);
+print('Validation Consumers Accuracy (Precision):', consumersAccuracy);
+print('Validation F1-Score (per class):', f1Score); 
+
+//PREPARE IMAGE STACK 
+
+print('--- STEP 2: Preparing image stack for the AOI (Embeddings-Only) ---');
+
+var aoi = ee.FeatureCollection(CONFIG.LARGE_AOI_ASSET);
+var geometry = aoi.geometry();
+Map.centerObject(geometry, 9);
+Map.addLayer(aoi, {color: 'FF0000', fillColor: '00000000'}, 'Area of Interest');
+
+// --- Re-create the image stack for the entire AOI (Embeddings-Only) ---
+var embeddingsImage = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
+    .filterDate(CONFIG.DATE_RANGE.start, CONFIG.DATE_RANGE.end).filterBounds(geometry).mosaic().clip(geometry).toFloat();
+
+var combinedFeaturesImage = embeddingsImage;
+
+//CLASSIFY AOI AND VISUALIZE 
+
+print('--- STEP 3: Classifying AOI and adding to map ---');
+
+var finalClassification = combinedFeaturesImage.classify(classifier);
+
+Map.addLayer(finalClassification.selfMask(), {palette: ['#00FF00']}, 'Final Classification');
+var leaseBoundaries = ee.FeatureCollection(CONFIG.LEASE_ASSET);
+Map.addLayer(leaseBoundaries, {color: 'cyan'}, 'Lease Boundaries');
+
+EXPORT THE CLASSIFICATION RASTER 
+
+print('--- STEP 4: Preparing export task ---');
+
+var exportImage = finalClassification.selfMask().toByte();
+Export.image.toDrive({
+  image: exportImage, 
+  description: 'WA_Cages_Export', 
+  folder: 'GEE_Large_Area_Exports', 
+  fileNamePrefix: 'WA_Classification_Embeddings_Tile',
+  region: geometry,
+  scale: 10,
+  maxPixels: 1e12
+});
+
+print('Export task created. Please go to the "Tasks" tab to run it.');
+(QLD): PREPARE AND EXPORT THE MASTER TRAINING DATASET
+
+CONFIGURATION
+
+var CONFIG = {
+  DATE_RANGE: {start: '2021', end: '2022'},
+  
+  TRAINING_ASSET_OUT: 'projects/aquaculturemapping/assets/satellite_embedding/longline_train_qld',
+  
+  BUF_OUT: 20,              // Width of the "Ring Negative" buffer (meters)
+  SAMPLES_POS: 8000,        // Samples from your drawn Aquaculture polygons
+  SAMPLES_RING_NEG: 4000,   // Samples from the immediate water around them
+  SAMPLES_FAR_NEG: 2000,    // Samples from your drawn "Far" Water polygons
+};
+
+//DEFINE THE STUDY AREA 
+
+// Coordinates withheld from public repo — see data access statement in README
+   var searchCoordinates = [ /* REDACTED */ ];
+
+var searchPoints = ee.FeatureCollection(searchCoordinates.map(function(c) {
+  return ee.Feature(ee.Geometry.Point(c));
+}));
+
+var trainingAoiGeom = searchPoints.map(function(f) { return f.buffer(500); }).union(1).geometry();
+
+Map.centerObject(trainingAoiGeom, 8);
+print('--- Preparing Image Stack for Queensland ---');
+
+//BUILD THE IMAGE STACK 
+
+var embeddingsImage = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
+  .filterDate(CONFIG.DATE_RANGE.start, CONFIG.DATE_RANGE.end)
+  .filterBounds(trainingAoiGeom)
+  .mosaic()
+  .clip(trainingAoiGeom)
+  .toFloat();
+var sarComposite = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterDate(CONFIG.DATE_RANGE.start, CONFIG.DATE_RANGE.end)
+  .filterBounds(trainingAoiGeom)
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .select(['VV', 'VH'])
+  .median()
+  .toFloat();
+var imageInt = sarComposite.select('VV').multiply(100).add(4000).toInt16();
+var glcm = imageInt.glcmTexture({size: 4});
+var vv_mean_smoothed = sarComposite.select('VV').reduceNeighborhood({
+  reducer: ee.Reducer.mean(), 
+  kernel: ee.Kernel.square({radius: 50, units: 'meters'})
+}).rename('VV_mean_smoothed');
+var vv_sharpened = sarComposite.select('VV').convolve(ee.Kernel.laplacian8()).rename('VV_sharpened');
+var sarFeatures = sarComposite
+  .addBands(glcm)
+  .addBands(vv_mean_smoothed)
+  .addBands(vv_sharpened)
+  .select(['VV', 'VH', 'VV_contrast', 'VV_corr', 'VV_ent', 'VV_diss', 'VV_var', 'VV_mean_smoothed', 'VV_sharpened']);
+
+var combinedFeaturesImage = embeddingsImage.addBands(sarFeatures);
+
+//SAMPLING 
+
+print('--- Preparing Training Samples ---');
+var corePos = aquaculturePolygons; 
+var farNeg = waterPolygons;
+var outerRing = corePos.map(function(f) { 
+  return f.buffer(CONFIG.BUF_OUT).difference(f); 
+});
+var posMask = ee.Image().paint(corePos, 1).selfMask();
+var ringNegMask = ee.Image().paint(outerRing, 1).selfMask();
+var farNegMask = ee.Image().paint(farNeg, 1).selfMask();
+var posSamples = combinedFeaturesImage.addBands(ee.Image(1).rename('label'))
+  .updateMask(posMask)
+  .stratifiedSample({
+    numPoints: CONFIG.SAMPLES_POS, 
+    classBand: 'label', 
+    region: trainingAoiGeom, 
+    scale: 10, 
+    geometries: true
+  });
+var ringNegSamples = combinedFeaturesImage.addBands(ee.Image(0).rename('label'))
+  .updateMask(ringNegMask)
+  .stratifiedSample({
+    numPoints: CONFIG.SAMPLES_RING_NEG, 
+    classBand: 'label', 
+    region: trainingAoiGeom, 
+    scale: 10, 
+    geometries: true
+  });
+
+var farNegSamples = combinedFeaturesImage.addBands(ee.Image(0).rename('label'))
+  .updateMask(farNegMask)
+  .stratifiedSample({
+    numPoints: CONFIG.SAMPLES_FAR_NEG, 
+    classBand: 'label', 
+    region: trainingAoiGeom, 
+    scale: 10, 
+    geometries: true
+  });
+
+var training = posSamples.merge(ringNegSamples).merge(farNegSamples);
+print('Total training samples:', training.size());
+
+Map.addLayer(posMask, {palette: 'green'}, 'Positive Samples Zone', false);
+Map.addLayer(ringNegMask, {palette: 'yellow'}, 'Ring Negative Samples Zone', false);
+Map.addLayer(farNegMask, {palette: 'blue'}, 'Far Negative Samples Zone', false);
+
+//EXPORT
+
+Export.table.toAsset({
+  collection: training,
+  description: 'Export_Unified_Training_Samples_QLD',
+  assetId: CONFIG.TRAINING_ASSET_OUT
+});
+
+//(QLD) TRAIN MODEL, VALIDATE, & SCAN SEARCH AREA
+
+var CONFIG = {
+  // 1. ASSET PATHS
+  // Ensure this matches exactly what you exported in Script A
+  TRAINING_ASSET: 'projects/aquaculturemapping/assets/satellite_embedding/longline_train_qld',
+  
+  // 2. MODEL CONFIG
+  DATE_RANGE: {start: '2021', end: '2022'},
+  RF_TREES: 150,  
+  SEED: 7,
+  TRAIN_VALIDATE_SPLIT: 0.8 
+};
+
+DEFINE SCAN AREA
+
+var coordinates = [
+  <CO-ORDINATES (I’ve left them out for now as I’m not sure on our level of transparency regarding spatial information)>
+];
+
+var searchPoints = ee.FeatureCollection(coordinates.map(function(c) {
+  return ee.Feature(ee.Geometry.Point(c));
+}));
+var scanArea = searchPoints.map(function(f) { return f.buffer(500); }).union(1).geometry();
+
+Map.centerObject(scanArea, 10);
+print('--- Scan Area Defined ---');
+
+
+//TRAIN THE MODEL
+
+print('--- STEP 1: Preparing and Training Classifier ---');
+
+var training = ee.FeatureCollection(CONFIG.TRAINING_ASSET);
+training = training.randomColumn('random', CONFIG.SEED);
+var trainingSet = training.filter(ee.Filter.lt('random', CONFIG.TRAIN_VALIDATE_SPLIT));
+var validationSet = training.filter(ee.Filter.gte('random', CONFIG.TRAIN_VALIDATE_SPLIT));
+
+print('Total Samples:', training.size());
+print('Training Samples:', trainingSet.size());
+print('Validation Samples:', validationSet.size());
+
+var allBandNames = trainingSet.first().propertyNames()
+  .remove('label').remove('system:index').remove('random');
+var classifier = ee.Classifier.smileRandomForest({
+  numberOfTrees: CONFIG.RF_TREES,
+  seed: CONFIG.SEED
+}).train({
+  features: trainingSet,
+  classProperty: 'label',
+  inputProperties: allBandNames
+});
+
+print('Classifier trained successfully.');
+
+
+//VALIDATE THE MODEL 
+
+print('--- STEP 1b: Validating Classifier ---');
+
+var validated = validationSet.classify(classifier);
+var confusionMatrix = validated.errorMatrix('label', 'classification');
+var overallAccuracy = confusionMatrix.accuracy();
+var producersAccuracy = confusionMatrix.producersAccuracy(); // Recall, shape [2, 1]
+var consumersAccuracy = confusionMatrix.consumersAccuracy(); // Precision, shape [1, 2]
+var precision = consumersAccuracy.transpose(); 
+var f1Score = producersAccuracy.multiply(precision).multiply(2)
+              .divide(producersAccuracy.add(precision));
+
+print('Validation Confusion Matrix:', confusionMatrix);
+print('Validation Overall Accuracy:', overallAccuracy);
+print('Validation Producers Accuracy (Recall):', producersAccuracy);
+print('Validation Consumers Accuracy (Precision):', consumersAccuracy);
+print('Validation F1-Score (per class):', f1Score); // <-- Corrected
+
+//PREPARE IMAGE STACK 
+
+print('--- STEP 2: Preparing Image Stack for Scan ---');
+
+var embeddingsImage = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL')
+  .filterDate(CONFIG.DATE_RANGE.start, CONFIG.DATE_RANGE.end)
+  .filterBounds(scanArea)
+  .mosaic()
+  .clip(scanArea)
+  .toFloat();
+
+
+var sarComposite = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterDate(CONFIG.DATE_RANGE.start, CONFIG.DATE_RANGE.end)
+  .filterBounds(scanArea)
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .filter(ee.Filter.eq('instrumentMode', 'IW'))
+  .select(['VV', 'VH'])
+  .median()
+  .toFloat();
+
+var imageInt = sarComposite.select('VV').multiply(100).add(4000).toInt16();
+var glcm = imageInt.glcmTexture({size: 4});
+var vv_mean_smoothed = sarComposite.select('VV').reduceNeighborhood({
+  reducer: ee.Reducer.mean(), 
+  kernel: ee.Kernel.square({radius: 50, units: 'meters'})
+}).rename('VV_mean_smoothed');
+var vv_sharpened = sarComposite.select('VV').convolve(ee.Kernel.laplacian8()).rename('VV_sharpened');
+
+var sarFeatures = sarComposite
+  .addBands(glcm)
+  .addBands(vv_mean_smoothed)
+  .addBands(vv_sharpened)
+  .select(['VV', 'VH', 'VV_contrast', 'VV_corr', 'VV_ent', 'VV_diss', 'VV_var', 'VV_mean_smoothed', 'VV_sharpened']);
+
+var combinedFeaturesImage = embeddingsImage.addBands(sarFeatures).clip(scanArea);
+
+
+//CLASSIFY & DISPLAY
+
+print('--- STEP 3: Classifying Search Area ---');
+
+var classification = combinedFeaturesImage.classify(classifier);
+var classVis = {min: 0, max: 1, palette: ['00000000', '#00FF00']}; // 0=Transparent, 1=Green
+
+Map.addLayer(scanArea, {color: 'red', fillColor: '00000000'}, 'Scan Area (AOI)');
+Map.addLayer(sarComposite, {bands:['VV'], min:-20, max:0}, 'SAR Composite', false);
+Map.addLayer(classification.selfMask(), classVis, 'Detected Longlines (Green)');
+
+EXPORT
+
+print('--- STEP 4: Preparing Export Task ---');
+
+Export.image.toDrive({
+  image: classification.toByte(), 
+  description: 'QLD_Longline_Classification',
+  folder: 'GEE_Exports',
+  fileNamePrefix: 'QLD_Longlines_2021_2022',
+  region: scanArea,
+  scale: 10,
+  maxPixels: 1e13
+});
