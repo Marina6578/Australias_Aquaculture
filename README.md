@@ -43,3 +43,15 @@ The Data analysis and visualization for this project were conducted in R
 | 17 | `17_manuscript_tables_24apr26_PublicationV1.Rmd` | Builds tables supporting the manuscript Results writing | — | — |
 | 18 | `18_statuscheck_SA_and_NSW_Publication.Rmd` | Checks whether state-released status matches infrastructure presence detected in this study | Results section | — |
 
+We downloaded the lease data to start our analysis. If you want to rerun it, you will need to contact the Data Custodians and /or use links to aquaculture lease data in each state of Australia. If you are remaking it for another Country or territory, the leases mean the farms/sites that received a permit to do aquaculture, so you can download datasets or create a polygon around a region (downloading can be better, as it could have species data, other information that is important). 
+## Custodians of leased mariculture site datasets
+
+| State | Custodian / Source | Link |
+|-------|--------------------|------|
+| QLD | Department of Agriculture, Fisheries and Forestry (DAFF) | List of vector points provided directly — no public link |
+| NSW | Department of Primary Industries and Regional Development (DPIRD) | [Fisheries Data Portal](https://webmap.industry.nsw.gov.au/Html5Viewer/index.html?viewer=Fisheries_Data_Portal) · *Production Data Comparison* (Dept. of Primary Industries) |
+| VIC | Coastkit | [Coastkit map viewer](https://mapshare.vic.gov.au/coastkit/) · *VFA Commercial Fish Production Information Bulletin 2024* (PDF) |
+| TAS | The List | [Geo-metadata record](https://www.thelist.tas.gov.au/app/content/data/geo-meta-data-record?detailRecordUID=10db46db-698d-43e6-a1a7-e1bfff13aedc) |
+| SA | data.sa / PIRSA / DPIRD | [Aquaculture leases and licences](https://data.sa.gov.au/data/dataset/aquaculture-leases-and-licences) |
+| WA | DPIRD | [Aquaculture sites dataset](https://catalogue.data.wa.gov.au/dataset/aquaculture-sites-dpird-0) |
+| NT | Department of Industry, Tourism and Trade (NT Government) | PDF with point locations provided; polygons digitised in-house (only pearls present for mariculture) |
