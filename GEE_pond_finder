@@ -1,0 +1,182 @@
+// Load shoreline polygons (vector features)
+var mainlands = ee.FeatureCollection('projects/sat-io/open-datasets/shoreline/mainlands');
+var bigIslands = ee.FeatureCollection('projects/sat-io/open-datasets/shoreline/big_islands');
+var smallIslands = ee.FeatureCollection('projects/sat-io/open-datasets/shoreline/small_islands');
+
+// Merge all land polygons into one FeatureCollection
+var osm = mainlands.merge(bigIslands).merge(smallIslands);
+
+
+// reduce the focus area a bit // use bigger regions or smaller areas
+//Filters the region leases within the (region in paragraphs) and simplifies the geometry.
+var focus_sites = region_leases.filterBounds(region_map).geometry().simplify(100);
+var buffer_geom = focus_sites.buffer(1000).dissolve(); // buffer this out to catch farms outside lease boundaries
+var osm_simple = osm.filterBounds(buffer_geom).geometry().simplify(100);//: Filters and simplifies the OSM data within the buffered geometry.
+
+// make raster clips
+var extent_clip = ee.Image().byte().paint(ee.Feature(buffer_geom, {zone: 1}), "zone");//Creating an extent raster from the buffered geometry
+var land_clip = ee.Image().byte().paint(osm_simple, 1);
+var coastaleco_clip = gic_prob.select('twprobabilityEnd').unmask(0,false).lt(70);
+var output_clip = land_clip.updateMask(extent_clip).updateMask(coastaleco_clip);
+
+
+// cloud masking function // A function that masks clouds based on probability
+function maskS2ProbClouds(image) {
+  var clouds = ee.Image(image.get('cloud_mask')).select('probability');
+  var isNotCloud = clouds.lt(10);
+  return image.updateMask(isNotCloud).updateMask(output_clip).select(['B2','B3','B4','B8','B11','B12']);
+}
+
+
+// Create the image stack based on some time/extent thresholds
+  var s2_clouds = sentinel_clouds
+                    .filterBounds(buffer_geom)
+                    .filterDate('2021-07-01', '2022-06-30');
+  //print(s2_clouds)
+  //Map.addLayer(s2_clouds)
+  var s2_filtered = sentinel2_1C
+                      .filterBounds(buffer_geom)
+                      .filterDate('2021-07-01', '2022-06-30');
+  //print(s2_filtered)
+  var s2_CloudJoin = ee.Join.saveFirst('cloud_mask').apply({
+    primary: s2_filtered,
+    secondary: s2_clouds,
+    condition: ee.Filter.equals({leftField: 'system:index', rightField: 'system:index'})
+  });
+
+
+// build the stack// Applies the cloud masking function to the joined image collection and creates a median image stack masked by the output_clip.
+var s2_stack = ee.ImageCollection(s2_CloudJoin).map(maskS2ProbClouds);
+print(s2_stack.size());
+
+// make a visual image
+var s2_image = s2_stack.median().updateMask(output_clip);
+
+
+// Define functions for the image metrics
+
+function add_ndwi(image) {
+  return(image.addBands(image.normalizedDifference(['B3','B8']).rename('NDWI')).gt(0));
+}
+
+function add_mndwi (image) {
+  return(image.addBands(image.normalizedDifference(['B3','B11']).rename('MNDWI')).gt(0));
+}
+
+function add_fisher (image) {
+  return(
+    image.addBands(
+      image.expression(
+        '1.7204 + 171 * Green + 3 * Red - 70 * NIR - 45 * SWIR1 - 71 * SWIR2',
+        {
+          Green:image.select('B3'),
+          Red:image.select('B4'), 
+          NIR:image.select('B8'),
+          SWIR1:image.select('B11'), 
+          SWIR2:image.select('B12')
+        }
+  ).rename('Fisher_water')).gt(0));
+}
+
+// Calculate the metrics and add to the stack
+var s2_stack_metrics = s2_stack.map(add_ndwi)
+                               .map(add_mndwi)
+                               .map(add_fisher)
+                               .select(['NDWI','MNDWI','Fisher_water']);
+
+var s2_stack_metrics_sum = s2_stack_metrics.reduce(ee.Reducer.sum()).updateMask(output_clip);
+var s2_stack_metrics_stddev = s2_stack_metrics.reduce(ee.Reducer.stdDev()).updateMask(output_clip);
+var s2_stack_metrics_percs = s2_stack_metrics.reduce(ee.Reducer.percentile([20, 80])).updateMask(output_clip);
+
+
+// =======================================================
+// Adaptive thresholding based on percentiles in AOI
+// =======================================================
+var percs = s2_stack_metrics_sum.reduceRegion({
+  reducer: ee.Reducer.percentile([10,50,90]),
+  geometry: buffer_geom,
+  scale: 10,
+  maxPixels: 1e13
+});
+
+// Extract adaptive thresholds
+var ndwi_thr_value = ee.Number(percs.get('NDWI_sum_p90'));    
+var fisher_thr_value = ee.Number(percs.get('Fisher_water_sum_p90')); 
+
+// Apply thresholds using these adaptive values
+var ndwi_threshold = s2_stack_metrics_sum.select('NDWI_sum').gt(ndwi_thr_value);
+var fisher_threshold = s2_stack_metrics_sum.select('Fisher_water_sum').gt(fisher_thr_value);
+
+// Inspect values in Console
+print('NDWI adaptive threshold:', ndwi_thr_value);
+print('Fisher adaptive threshold:', fisher_thr_value);
+
+// Visualise threshold maps
+Map.addLayer(ndwi_threshold, {palette:['white','blue']}, "NDWI adaptive threshold", false);
+Map.addLayer(fisher_threshold, {palette:['white','green']}, "Fisher adaptive threshold", false);
+
+// add some data to the map
+//Change the region each time to generate the ponds 
+Map.centerObject(region_map, 10);
+
+Map.addLayer(output_clip, {}, "clip raster", false);
+Map.addLayer(s2_stack, {min:0, max:2000}, "S2 stack", false);
+
+Map.addLayer(s2_stack_metrics_sum, sum_vis, "S2 stack - sum metrics", false);
+Map.addLayer(s2_stack_metrics_stddev, {}, "S2 stack - std metrics", false);
+Map.addLayer(s2_stack_metrics_percs, {}, "S2 stack - percentile metrics", false);
+
+Map.addLayer(focus_sites, {color: 'yellow'}, "region_leases", false);
+Map.addLayer(buffer_geom, {color: 'red'}, "Buffered lease data", false);
+Map.addLayer(focus_sites, {color: 'pink'}, "region_map", false);
+
+// Exports
+
+// first make a single image stack
+
+var s2_full_stack = s2_stack_metrics_sum.addBands(s2_stack_metrics_stddev).addBands(s2_stack_metrics_percs);
+
+// Export to GEE for easier viewing
+Export.image.toAsset({
+  image: s2_full_stack,
+  description: 's2_metrics_export_asset',
+  assetId: 'projects/ee-marinambiental/assets/s2_metrics_export',
+  region: region_map,
+  scale: 10,
+  crs: 'EPSG:3577',
+  maxPixels: 1e13});
+
+
+// Export outside GEE for further analysis
+
+// Export the image to drive.
+Export.image.toDrive({
+  image: s2_full_stack,
+  description: 's2_metrics_export_drive',
+  folder: 'gee_aquaculture_exports',
+  fileNamePrefix: 's2_metrics_export',
+  scale: 10,
+  region: region_map,
+  maxPixels: 1e13,
+  fileFormat: "GeoTIFF",
+  crs: "EPSG:3577"
+});
+
+
+// create the buffer area polygon to then Intersect with export stats - to help make thresholds //
+var s2_lease_summary = s2_full_stack.reduceRegions({
+  collection: region_leases,
+  reducer: ee.Reducer.mean(),
+  scale: 10,
+  crs: "EPSG:3577",
+});
+
+Export.table.toDrive({
+  collection: s2_lease_summary,
+  description: 's2_lease_summary_export',
+  folder: 'gee_aquaculture_exports',
+  fileNamePrefix: 's2_lease_summary_export',
+  fileFormat: 'GeoJSON'
+});
+
+
