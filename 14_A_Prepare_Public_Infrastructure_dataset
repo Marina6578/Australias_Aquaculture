@@ -1,0 +1,74 @@
+---
+title: "14_A_Prepare_Public_Infrastructure_dataset"
+## Marina Christofidis (marina.christofidis@griffithuni.edu.au)
+## https://www.sustainableseasgroup.com/
+## GitHub: Marina6578/Australias_Aquaculture
+
+date: "2026-07-01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+#14_A_Prepare_Public_Infrastructure_Dataset.Rmd
+## -----------------------------------------------------------------------
+## Purpose: build a PUBLIC version of the national aquaculture dataset that
+## contains only the satellite-detected infrastructure layer. The leases
+## layer is excluded entirely from this output, since lease boundary data
+## from some custodians cannot be shared publicly. Use this script to
+## regenerate output_data/summaries/AU_infrastructure_public.gpkg any time
+## the internal AU_aquaculture_clean.gpkg is updated.
+```{r}
+
+## load libraries ----------------------------------------------------------------
+
+library(sf)
+library(dplyr)
+library(here)
+
+# =============================================================================
+# 1. READ THE INTERNAL (LEASES + DETECTIONS) GEOPACKAGE
+# =============================================================================
+
+gpkg_in <- here("output_data", "summaries", "AU_aquaculture_clean.gpkg")
+
+detections <- st_read(gpkg_in, layer = "detections", quiet = TRUE)
+
+# Sanity check - confirm the leases layer exists in the source but will NOT
+# be touched or exported anywhere below. Keeping this check here so that if
+# the internal layer naming ever changes, the script fails loudly rather
+# than silently shipping something it shouldn't.
+stopifnot("leases" %in% st_layers(gpkg_in)$name)
+
+# =============================================================================
+# 2. STRIP OUT ANYTHING THAT COULD IDENTIFY A SPECIFIC LEASE / OPERATOR
+# =============================================================================
+
+# lease_id is only useful for joining back to the (non-public) leases layer,
+# so it's dropped here. Everything else describes the detection itself
+# (location, type, area, taxonomic info) and is fine to share.
+infrastructure_public <- detections %>%
+  select(-any_of(c("lease_id", "licence_id", "licence_holder", "operator")))
+
+# Quick check before writing - make sure nothing lease-related slipped through
+names(infrastructure_public)
+
+# =============================================================================
+# 3. WRITE THE PUBLIC GEOPACKAGE
+# =============================================================================
+
+gpkg_out <- here("output_data", "summaries", "AU_Aqua_infrastructure_public.gpkg")
+
+st_write(infrastructure_public, gpkg_out, layer = "infrastructure",
+          delete_dsn = TRUE, quiet = TRUE)
+
+message("Public infrastructure layer written to: ", gpkg_out)
+message("Features: ", nrow(infrastructure_public))
+message("Fields: ", paste(names(infrastructure_public), collapse = ", "))
+
+# Reminder for SSRG : this is the only gpkg that should ever be pushed
+# to the public GitHub repo or used in the public Shiny app. The cleaned
+# combined gpkg (with leases) stays internal to the SSRG.
+
+```
+
