@@ -203,6 +203,10 @@ all_sites$species_label <- factor(
              "Black Tiger Prawn", "Barramundi", "Oysters")
 )
 
+st_write(all_sites,
+         here("output_data/Production_by_Detection.gpkg"),
+         delete_dsn = TRUE)
+
 # Extract coordinates for ggplot
 all_sites_coords <- all_sites %>%
   mutate(
