@@ -1,0 +1,580 @@
+---
+title: "14_B_Shiny_app_Public_Australian_Aquaculture_Infrastructure"
+Author: Marina Christofidis (marina.christofidis@griffithuni.edu.au and marina.christofidis@gmail.com)
+#https://www.sustainableseasgroup.com/
+#These Scripts are relative to Version 1 of Australia's Aquaculture Mapping
+#GitHub: Marina6578/Australias_Aquaculture
+#THIS IS THE PUBLIC VERSION - INFRASTRUCTURE / DETECTIONS ONLY, NO LEASES
+#Run 14_A_Prepare_Public_Infrastructure_Dataset.Rmd first to generate the gpkg this reads
+
+date: "2026-07-01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# About
+
+Public-facing Shiny app for the Australian aquaculture infrastructure
+dataset. This version deliberately does **not** include lease boundaries -
+some state custodians (QLD, NT) don't allow those to be shared publicly, so
+to keep one app that's safe to publish everywhere, leases are left out
+entirely and this only shows what our satellite pipeline actually detected.
+
+**Reads:** `output_data/summaries/AU_infrastructure_public.gpkg`
+
+- Layer `infrastructure` - one row per detected structure (pond, longline,
+  cage). No lease_id, no licence holder info, nothing that traces back to
+  an individual operator.
+
+# Packages
+
+```{r, eval=FALSE}
+install.packages(c("shiny","bslib","bsicons","sf","dplyr","leaflet",
+                   "leaflet.extras","plotly","DT","here","scales","stringr"))
+```
+
+# App
+
+```{r app}
+library(shiny)
+library(bslib)
+library(bsicons)
+library(sf)
+library(dplyr)
+library(stringr)
+library(leaflet)
+library(leaflet.extras)
+library(plotly)
+library(DT)
+library(here)
+library(scales)
+
+clean_geoms <- function(x, target = "MULTIPOLYGON") {
+  id_col <- intersect(c("detection_id"), names(x))[1]
+  get_ids <- function(i) if (!is.na(id_col)) x[[id_col]][i] else as.character(i)
+
+  # 1. Validate and drop empties
+  x <- st_make_valid(x)
+  empty <- st_is_empty(x)
+  if (any(empty)) {
+    message("Dropped ", sum(empty), " empty geometries")
+    x <- x[!empty, ]
+  }
+
+  # 2. Extract polygons from any GEOMETRYCOLLECTIONs
+  gc_idx <- which(st_geometry_type(x) == "GEOMETRYCOLLECTION")
+  if (length(gc_idx) > 0) {
+    extract_type <- sub("^MULTI", "", target)
+    drop_ids <- integer(0)
+    for (i in gc_idx) {
+      ex <- suppressWarnings(st_collection_extract(x[i, ], extract_type))
+      if (nrow(ex) == 0) {
+        drop_ids <- c(drop_ids, i)
+      } else {
+        st_geometry(x)[i] <- suppressWarnings(st_union(ex))
+      }
+    }
+    if (length(drop_ids) > 0) {
+      message("Dropped ", length(drop_ids),
+              " GEOMETRYCOLLECTION feature(s) with no polygon component: ",
+              paste(get_ids(drop_ids), collapse = ", "))
+      x <- x[-drop_ids, ]
+    }
+  }
+
+  # 3. Re-validate, drop empties and non-polygons
+  x <- st_make_valid(x)
+  x <- x[!st_is_empty(x), ]
+  non_poly <- !(st_geometry_type(x) %in% c("POLYGON", "MULTIPOLYGON"))
+  if (any(non_poly)) {
+    message("Dropped ", sum(non_poly), " non-polygon geometries")
+    x <- x[!non_poly, ]
+  }
+
+  # 4. Bulk cast first (fast path); fall back to per-row if it fails
+  result <- tryCatch(suppressWarnings(st_cast(x, target)),
+                     error = function(e) NULL)
+  if (!is.null(result)) return(result)
+
+  message("Bulk cast failed — retrying per-row to isolate degenerate geoms...")
+  ok <- vapply(seq_len(nrow(x)), function(i) {
+    tryCatch({ suppressWarnings(st_cast(x[i, ], target)); TRUE },
+             error = function(e) FALSE)
+  }, logical(1))
+  if (!all(ok)) {
+    message("Dropped ", sum(!ok), " degenerate geometries that failed cast: ",
+            paste(head(get_ids(which(!ok)), 10), collapse = ", "),
+            if (sum(!ok) > 10) paste0(" ...+", sum(!ok) - 10, " more") else "")
+    x <- x[ok, ]
+  }
+  st_cast(x, target)
+}
+
+# =============================================================================
+# 1. LOAD PUBLIC DATA (DETECTIONS ONLY - NO LEASES ANYWHERE IN THIS APP)
+# =============================================================================
+gpkg <- here("output_data", "summaries", "AU_Aqua_infrastructure_public.gpkg")
+
+detections <- st_read(gpkg, layer = "infrastructure", quiet = TRUE) %>%
+  st_transform(4326) %>%
+  clean_geoms()
+
+# Tidy a few edge cases for UI filtering
+detections$subgroup[is.na(detections$subgroup)]     <- "—"
+detections$infra_type[is.na(detections$infra_type)] <- "Unknown"
+detections$species[is.na(detections$species)]       <- "Unknown"
+detections$group[is.na(detections$group)]           <- "Unknown"
+
+# =============================================================================
+# 2. UI CHOICES
+# =============================================================================
+
+choice_realm      <- sort(unique(detections$realm))
+choice_infra_type <- sort(unique(detections$infra_type))
+choice_state      <- sort(unique(detections$state))
+choice_group      <- sort(unique(detections$group))
+choice_subgroup   <- sort(unique(detections$subgroup))
+choice_species    <- sort(unique(detections$species))
+
+# =============================================================================
+# 3. COLOUR PALETTES (Paul Tol muted, colourblind-safe)
+# =============================================================================
+
+pal_realm <- c("Marine" = "#0077BB", "Land-based" = "#33BBEE")
+
+# Pull marine/land colours straight from pal_realm so the map, legend and
+# bar charts always match - no separate hardcoded pair to keep in sync.
+col_marine <- unname(pal_realm["Marine"])
+col_land   <- unname(pal_realm["Land-based"])
+
+# =============================================================================
+# 4. PLOT HELPER
+# =============================================================================
+
+make_bar <- function(df, group_var, value_var, title,
+                     fill_col = "#4477AA", xlab = "km2") {
+  d <- df %>%
+    filter(!is.na(.data[[group_var]]), !is.na(.data[[value_var]])) %>%
+    group_by(label = .data[[group_var]]) %>%
+    summarise(total = sum(.data[[value_var]], na.rm = TRUE), .groups = "drop") %>%
+    filter(total > 0) %>% arrange(total)
+  if (nrow(d) == 0)
+    return(plotly_empty(type = "bar") %>%
+             layout(title = list(text = title, font = list(size = 12))))
+  plot_ly(d,
+          x = ~total, y = ~label, type = "bar", orientation = "h",
+          marker = list(color = fill_col,
+                        line = list(color = "white", width = 0.4))) %>%
+    layout(title  = list(text = title, font = list(size = 12), x = 0),
+           xaxis  = list(title = xlab, tickformat = ".3f"),
+           yaxis  = list(title = "", automargin = TRUE,
+                         tickfont = list(size = 10)),
+           margin = list(l = 10, r = 10, t = 40, b = 40),
+           paper_bgcolor = "rgba(0,0,0,0)", plot_bgcolor = "rgba(0,0,0,0)") %>%
+    config(displayModeBar = FALSE)
+}
+
+make_stacked_bar <- function(df, group_var, stack_var, value_var,
+                             title, pal, xlab = "km2") {
+  d <- df %>%
+    filter(!is.na(.data[[group_var]]), !is.na(.data[[stack_var]])) %>%
+    group_by(grp = .data[[group_var]], stk = .data[[stack_var]]) %>%
+    summarise(total = sum(.data[[value_var]], na.rm = TRUE), .groups = "drop") %>%
+    filter(total > 0)
+  if (nrow(d) == 0)
+    return(plotly_empty(type = "bar") %>%
+             layout(title = list(text = title, font = list(size = 12))))
+  lvl_order <- d %>% group_by(grp) %>% summarise(tot = sum(total)) %>%
+    arrange(tot) %>% pull(grp)
+  d$grp <- factor(d$grp, levels = lvl_order)
+  stk_levs <- unique(d$stk)
+  stk_cols <- unname(pal[stk_levs]); stk_cols[is.na(stk_cols)] <- "#AAAAAA"
+  p <- plot_ly()
+  for (i in seq_along(stk_levs)) {
+    sub <- d %>% filter(stk == stk_levs[i])
+    p <- add_trace(p, x = sub$total, y = as.character(sub$grp),
+                   name = stk_levs[i], type = "bar", orientation = "h",
+                   marker = list(color = stk_cols[i]))
+  }
+  p %>% layout(barmode = "stack",
+               title  = list(text = title, font = list(size = 12), x = 0),
+               xaxis  = list(title = xlab, tickformat = ".3f"),
+               yaxis  = list(title = "", automargin = TRUE,
+                             tickfont = list(size = 10)),
+               margin = list(l = 10, r = 10, t = 40, b = 40),
+               legend = list(orientation = "h", y = -0.18),
+               paper_bgcolor = "rgba(0,0,0,0)",
+               plot_bgcolor  = "rgba(0,0,0,0)") %>%
+    config(displayModeBar = FALSE)
+}
+
+# =============================================================================
+# 5. UI
+# =============================================================================
+
+ui <- page_navbar(
+  title = "Australian Aquaculture Infrastructure Explorer (Public)",
+  theme = bs_theme(
+    bootswatch   = "flatly",
+    primary      = "#4477AA",
+    success      = "#117733",
+    base_font    = font_google("Roboto"),
+    heading_font = font_google("Roboto")
+  ),
+
+  sidebar = sidebar(
+    width = 275, bg = "#f5f6f7",
+
+    accordion(
+      open = c("Realm", "Geography", "Biology"),
+
+      accordion_panel(
+        "Realm",
+        checkboxGroupInput("sel_realm",  "Realm",
+          choices = choice_realm,      selected = choice_realm),
+        checkboxGroupInput("sel_infra",  "Infrastructure type",
+          choices = choice_infra_type, selected = choice_infra_type)
+      ),
+
+      accordion_panel(
+        "Geography",
+        checkboxGroupInput("sel_state", "State / Territory",
+          choices = choice_state, selected = choice_state)
+      ),
+
+      accordion_panel(
+        "Biology",
+        checkboxGroupInput("sel_group", "Taxonomic group",
+          choices = choice_group, selected = choice_group),
+        checkboxGroupInput("sel_subgroup", "Subgroup (Mollusc only)",
+          choices = choice_subgroup, selected = choice_subgroup),
+        selectizeInput("sel_species", "Species",
+          choices  = c("All species" = "ALL", choice_species),
+          selected = "ALL",
+          multiple = TRUE,
+          options  = list(placeholder = "Select one or more..."))
+      )
+    ),
+
+    hr(),
+    actionButton("reset_btn", "Reset all filters",
+                 class = "btn-outline-secondary btn-sm w-100")
+  ),
+
+  # ── Tab 1 · Map ────────────────────────────────────────────────────────────
+  nav_panel(
+    "Map",
+    layout_columns(
+      col_widths = c(4, 4, 4),
+      value_box(title    = "Detections shown",
+                value    = textOutput("vb_n"),
+                showcase = bs_icon("pin-map-fill"),
+                theme    = value_box_theme(bg = "#6C757D", fg = "white")),
+      value_box(title    = "Marine",
+                value    = textOutput("vb_n_marine"),
+                showcase = bs_icon("water"),
+                theme    = value_box_theme(bg = "#4477AA", fg = "white")),
+      value_box(title    = "Total infrastructure area",
+                value    = textOutput("vb_infra"),
+                showcase = bs_icon("grid-fill"),
+                theme    = value_box_theme(bg = "#CC6677", fg = "white"))
+    ),
+    div(style = "display:flex; align-items:center; gap:10px;
+                 padding:6px 4px 2px 4px; font-size:0.85rem;",
+        strong("Basemap:"),
+        radioButtons("basemap", label = NULL,
+                     choices  = c("Light"              = "light",
+                                  "Dark"                = "dark",
+                                  "Satellite (mosaic)"  = "esri",
+                                  "Sentinel-2 (2021)"   = "s2_2021",
+                                  "Sentinel-2 (2022)"   = "s2_2022"),
+                     selected = "s2_2021", inline = TRUE)),
+    helpText("Sentinel-2 layers are the EOX Sentinel-2 cloudless annual",
+             "mosaics - imagery is from that specific year, so it lines up",
+             "with when a lot of our detections were mapped, instead of a",
+             "multi-year blend where things can look shifted. The",
+             "'Satellite (mosaic)' option is Esri's World Imagery basemap -",
+             "generally higher resolution, but it's a blend of multiple",
+             "years so a detection can sit slightly off from what's",
+             "visible underneath in some spots."),
+    leafletOutput("map", height = "62vh")
+  ),
+
+  # ── Tab 2 · Infrastructure area ────────────────────────────────────────────
+  nav_panel(
+    "Infrastructure area",
+    layout_columns(
+      col_widths = c(6, 6),
+      card(card_header("By state x realm"),
+           plotlyOutput("bar_infra_state",   height = "300px")),
+      card(card_header("By realm"),
+           plotlyOutput("bar_infra_realm",   height = "300px"))
+    ),
+    layout_columns(
+      col_widths = c(6, 6),
+      card(card_header("By species"),
+           plotlyOutput("bar_infra_species", height = "300px")),
+      card(card_header("By taxonomic group"),
+           plotlyOutput("bar_infra_group",   height = "300px"))
+    ),
+    layout_columns(
+      col_widths = c(6, 6),
+      card(card_header("By infrastructure type"),
+           plotlyOutput("bar_infra_type",    height = "300px")),
+      card(card_header("By state"),
+           plotlyOutput("bar_infra_state_only", height = "300px"))
+    )
+  ),
+
+  # ── Tab 3 · Summary table ──────────────────────────────────────────────────
+  nav_panel(
+    "Summary table",
+    card(card_header("Aggregated summary - current filters"),
+         DTOutput("summary_table")),
+    card(card_header("Individual detections - current filters"),
+         DTOutput("records_table"))
+  ),
+
+  # ── Tab 4 · About ──────────────────────────────────────────────────────────
+  nav_panel(
+    "About",
+    card(
+      max_width = "760px",
+      card_header("About this app"),
+      p("This is the public version of the national Australian aquaculture
+         infrastructure dataset compiled by the Sustainable Seas Research
+         Group, Griffith University. It shows only satellite-detected
+         infrastructure - lease boundaries are not included in this app,
+         as some state and territory custodians don't permit those to be
+         shared publicly."),
+      tags$ul(
+        tags$li(strong("Infrastructure / detections"), " - individual
+                satellite-detected aquaculture structures (ponds,
+                longlines, cages)."),
+        tags$li(strong("Group"), " - Fish, Mollusc, Crustacean, Algae.
+                Bivalves are a subset of Mollusc; see the ",
+                code("subgroup"), " column for Bivalve/Gastropod distinction."),
+        tags$li(strong("Basemap"), " - 'Satellite (mosaic)' is Esri's
+                World Imagery, a higher-resolution multi-year blend. The
+                Sentinel-2 options are single-year cloudless mosaics
+                (2021 / 2022) courtesy of EOX IT Services GmbH, so the
+                imagery date is close to when a lot of this dataset was
+                detected - useful for checking a specific detection
+                against imagery from roughly the same time.")
+      ),
+      p(em("Data: Christofidis et al. (in prep.). Sustainable Seas Research
+           Group, Griffith University.")),
+      p(em("Sentinel-2 cloudless - https://s2maps.eu by EOX IT Services GmbH
+           (Contains modified Copernicus Sentinel data, processed by ESA)."))
+    )
+  )
+)
+
+# =============================================================================
+# 6. SERVER
+# =============================================================================
+
+server <- function(input, output, session) {
+
+  # --- Filtered detections (single reactive - no leases anywhere) -----------
+  fdat <- reactive({
+    d <- detections
+    if (length(input$sel_realm)    > 0) d <- d %>% filter(realm     %in% input$sel_realm)
+    if (length(input$sel_infra)    > 0) d <- d %>% filter(infra_type %in% input$sel_infra)
+    if (length(input$sel_state)    > 0) d <- d %>% filter(state     %in% input$sel_state)
+    if (length(input$sel_group)    > 0) d <- d %>% filter(group     %in% input$sel_group)
+    if (length(input$sel_subgroup) > 0) d <- d %>% filter(subgroup  %in% input$sel_subgroup)
+    if (!("ALL" %in% input$sel_species) && length(input$sel_species) > 0)
+      d <- d %>% filter(species %in% input$sel_species)
+    d
+  })
+  fdat_df <- reactive({ fdat() %>% st_drop_geometry() })
+
+  # --- Reset button -----------------------------------------------------------
+  observeEvent(input$reset_btn, {
+    updateCheckboxGroupInput(session, "sel_realm",    selected = choice_realm)
+    updateCheckboxGroupInput(session, "sel_infra",    selected = choice_infra_type)
+    updateCheckboxGroupInput(session, "sel_state",    selected = choice_state)
+    updateCheckboxGroupInput(session, "sel_group",    selected = choice_group)
+    updateCheckboxGroupInput(session, "sel_subgroup", selected = choice_subgroup)
+    updateSelectizeInput    (session, "sel_species",  selected = "ALL")
+    updateRadioButtons      (session, "basemap",      selected = "s2_2021")
+  })
+
+  # --- Value boxes ------------------------------------------------------------
+  output$vb_n <- renderText({
+    format(nrow(fdat()), big.mark = ",")
+  })
+  output$vb_n_marine <- renderText({
+    format(sum(fdat_df()$realm == "Marine", na.rm = TRUE), big.mark = ",")
+  })
+  output$vb_infra <- renderText({
+    v <- sum(fdat_df()$infra_area_km2, na.rm = TRUE)
+    paste(format(round(v, 2), big.mark = ",", nsmall = 2), "km2")
+  })
+
+  # --- Map --------------------------------------------------------------------
+  # EOX Sentinel-2 cloudless annual mosaics - single calendar year per layer,
+  # rather than the multi-year Esri World Imagery blend. Attribution is
+  # required by EOX's terms of use, see the About tab and the addTiles
+  # attribution string below.
+  s2_url <- function(year) {
+    paste0("https://tiles.maps.eox.at/wmts/1.0.0/s2cloudless-", year,
+           "_3857/default/g/{z}/{y}/{x}.jpg")
+  }
+  s2_attribution <- paste(
+    "Sentinel-2 cloudless -",
+    '<a href="https://s2maps.eu" target="_blank">s2maps.eu</a>',
+    "by EOX IT Services GmbH (Contains modified Copernicus Sentinel data,",
+    "processed by ESA)")
+
+  add_basemap <- function(map, choice) {
+    switch(choice,
+      "light"   = map %>% addProviderTiles(providers$CartoDB.Positron,
+                                            layerId = "basemap"),
+      "dark"    = map %>% addProviderTiles(providers$CartoDB.DarkMatter,
+                                            layerId = "basemap"),
+      "esri"    = map %>% addProviderTiles(providers$Esri.WorldImagery,
+                                            layerId = "basemap"),
+      "s2_2021" = map %>% addTiles(s2_url(2021), layerId = "basemap",
+                                    attribution = s2_attribution),
+      "s2_2022" = map %>% addTiles(s2_url(2022), layerId = "basemap",
+                                    attribution = s2_attribution)
+    )
+  }
+
+  output$map <- renderLeaflet({
+    leaflet(options = leafletOptions(minZoom = 3)) %>%
+      add_basemap("s2_2021") %>%
+      setView(lng = 134, lat = -27, zoom = 4)
+  })
+
+  observeEvent(input$basemap, {
+    leafletProxy("map") %>%
+      removeTiles(layerId = "basemap") %>%
+      add_basemap(input$basemap)
+  })
+
+  observe({
+    d <- fdat()
+    leafletProxy("map") %>% clearShapes() %>% clearControls()
+    if (nrow(d) == 0) return(NULL)
+
+    hi <- highlightOptions(weight = 2, color = "#333333",
+                           fillOpacity = 0.95, bringToFront = TRUE)
+
+    make_popup <- function(x) {
+      paste0(
+        "<b>State:</b> ",            x$state,          "<br>",
+        "<b>Realm:</b> ",            x$realm,          "<br>",
+        "<b>Infra type:</b> ",       x$infra_type,     "<br>",
+        "<b>Group:</b> ",            x$group,
+        ifelse(x$subgroup == "—", "",
+               paste0(" (", x$subgroup, ")")),         "<br>",
+        "<b>Species:</b> ",          x$species,        "<br>",
+        "<b>Infra area (km2):</b> ", round(x$infra_area_km2, 5)
+      )
+    }
+
+    d_marine <- d %>% filter(realm == "Marine")
+    d_land   <- d %>% filter(realm == "Land-based")
+
+    proxy <- leafletProxy("map")
+
+    if (nrow(d_marine) > 0)
+      proxy <- proxy %>% addPolygons(
+        data = d_marine, fillColor = col_marine, color = "white",
+        weight = 0.6, opacity = 0.9, fillOpacity = 0.85,
+        popup = make_popup(d_marine), highlightOptions = hi)
+    if (nrow(d_land) > 0)
+      proxy <- proxy %>% addPolygons(
+        data = d_land, fillColor = col_land, color = "white",
+        weight = 0.6, opacity = 0.9, fillOpacity = 0.9,
+        popup = make_popup(d_land), highlightOptions = hi)
+
+    proxy %>%
+      addLegend(
+        position = "bottomright",
+        colors   = c(col_marine, col_land),
+        labels   = c("Marine infrastructure", "Land-based ponds"),
+        title    = "Detected infrastructure",
+        opacity  = 0.9
+      )
+  })
+
+  # --- Infrastructure area charts --------------------------------------------
+  output$bar_infra_state <- renderPlotly({
+    make_stacked_bar(fdat_df(), "state", "realm",
+                     "infra_area_km2", "Infrastructure area by state x realm",
+                     pal_realm)
+  })
+  output$bar_infra_realm <- renderPlotly({
+    make_bar(fdat_df(), "realm", "infra_area_km2",
+             "Infrastructure area by realm", "#4477AA")
+  })
+  output$bar_infra_species <- renderPlotly({
+    make_bar(fdat_df(), "species", "infra_area_km2",
+             "Infrastructure area by species", "#44AA99")
+  })
+  output$bar_infra_group <- renderPlotly({
+    make_bar(fdat_df(), "group", "infra_area_km2",
+             "Infrastructure area by group", "#DDAA33")
+  })
+  output$bar_infra_type <- renderPlotly({
+    make_bar(fdat_df(), "infra_type", "infra_area_km2",
+             "Infrastructure area by type", "#CC6677")
+  })
+  output$bar_infra_state_only <- renderPlotly({
+    make_bar(fdat_df(), "state", "infra_area_km2",
+             "Infrastructure area by state", "#88CCAA")
+  })
+
+  # --- Summary table ----------------------------------------------------------
+  output$summary_table <- renderDT({
+    d <- fdat_df() %>%
+      group_by(state, realm, infra_type, group, subgroup, species) %>%
+      summarise(
+        n_detections   = n(),
+        infra_area_km2 = round(sum(infra_area_km2, na.rm = TRUE), 4),
+        .groups = "drop"
+      ) %>%
+      arrange(state, realm)
+
+    datatable(d, filter = "top", rownames = FALSE,
+              extensions = "Buttons",
+              options = list(pageLength = 20, scrollX = TRUE,
+                             dom = "Bfrtip", buttons = c("csv", "excel")),
+              colnames = c("State","Realm","Infra type",
+                           "Group","Subgroup","Species",
+                           "N detections","Infra area (km2)")) %>%
+      formatStyle("infra_area_km2",
+                  background = styleColorBar(
+                    c(0, max(d$infra_area_km2, na.rm = TRUE)), "#c8dff0"),
+                  backgroundSize = "98% 80%",
+                  backgroundRepeat = "no-repeat",
+                  backgroundPosition = "center")
+  })
+
+  output$records_table <- renderDT({
+    d <- fdat_df() %>%
+      select(state, realm, infra_type,
+             group, subgroup, species,
+             infra_area_km2) %>%
+      mutate(infra_area_km2 = round(infra_area_km2, 5))
+
+    datatable(d, filter = "top", rownames = FALSE,
+              options = list(pageLength = 15, scrollX = TRUE),
+              colnames = c("State","Realm","Infra type",
+                           "Group","Subgroup","Species",
+                           "Infra area (km2)"))
+  })
+}
+
+# =============================================================================
+# 7. RUN
+# =============================================================================
+
+shinyApp(ui, server)
+```
